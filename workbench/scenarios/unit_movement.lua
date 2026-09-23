@@ -25,8 +25,10 @@ local function isCandidate(def)
 	return true
 end
 
+local arena = VFS.Include("workbench/lib/arena.lua")
+
 -- synced state
-local preexisting, tracked = {}, {}
+local tracked = {}
 
 local function encode(t)
 	local parts = {}
@@ -38,16 +40,10 @@ return {
 	name = "unit_movement",
 	timeout = 3600,
 	synced = {
-		snapshot = function()
-			for _, u in ipairs(Spring.GetAllUnits()) do preexisting[u] = true end
-			return 0
-		end,
+		prepare = arena.prepare,
 		clear = function()
-			for _, u in ipairs(Spring.GetAllUnits()) do
-				if not preexisting[u] then Spring.DestroyUnit(u, false, true) end
-			end
 			tracked = {}
-			return 0
+			return arena.clear()
 		end,
 		-- spawn one unit per lane; returns the number spawned
 		spawn = function(team, lane, defName)
@@ -94,7 +90,7 @@ return {
 		end
 		table.sort(defs, function(a, b) return a.name < b.name end)
 		ctx.log(#defs .. " mobile ground unit types")
-		ctx.call("snapshot")
+		ctx.call("prepare") -- flat arena: slopes change speeds and block paths
 
 		for first = 1, #defs, LANES do
 			ctx.call("clear")
