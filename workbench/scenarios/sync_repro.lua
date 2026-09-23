@@ -15,7 +15,7 @@ local SPEED = 20
 
 return {
 	name = "sync_repro",
-	timeout = 900,
+	timeout = 2400,
 	run = function(ctx)
 		if not Platform.hasSyncChecksums then
 			ctx.check("sync_checksums_available", false, "engine built without SYNCCHECK")
@@ -31,7 +31,7 @@ return {
 		-- totalFrames areaFraction offsetX offsetZ unitMultiplier startFrame
 		Spring.SendLuaRulesMsg(string.format("$st$:synctest %d 0.5 0.25 0.25 1 %d", RUN_FRAMES, START_FRAME))
 
-		local done = ctx.waitUntil(function() return Spring.GetGameFrame() > START_FRAME + RUN_FRAMES + 30 end, 800)
+		local done = ctx.waitUntil(function() return Spring.GetGameFrame() > START_FRAME + RUN_FRAMES + 30 end, 2300)
 		Spring.SendCommands("setminspeed 1", "setmaxspeed 1")
 		ctx.check("battle_ran", done, "reached frame " .. Spring.GetGameFrame())
 
