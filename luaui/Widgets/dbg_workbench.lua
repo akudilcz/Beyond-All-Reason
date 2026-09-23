@@ -18,6 +18,10 @@ function widget:Initialize()
 		return
 	end
 	harness = VFS.Include("workbench/harness.lua")
+	-- LuaUI reloaded mid-game: GameStart will not fire again, so start now
+	if Spring.GetGameFrame() > 0 then
+		harness.Start()
+	end
 end
 
 function widget:GameStart()
