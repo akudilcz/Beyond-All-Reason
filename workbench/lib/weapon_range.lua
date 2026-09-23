@@ -68,6 +68,7 @@ end
 return {
 	name = scenarioName,
 	timeout = timeout,
+	simSpeed = "max", -- all waits are in sim time
 	synced = {
 		prepare = arena.prepare,
 		clear = function()
@@ -107,8 +108,28 @@ return {
 				local a = lane.attacker
 				for i, w in ipairs(UnitDefs[Spring.GetUnitDefID(a)].weapons) do
 					local reload = Spring.GetUnitWeaponState(a, i, "reloadState") or 0
-					parts[#parts + 1] = WeaponDefs[w.weaponDef].name .. (reload > lane.placedFrame and " fired" or " idle")
+					local state = reload > lane.placedFrame and " fired" or " idle"
+					-- what the weapon is aiming at: its own target, another lane's, or nothing
+					local ttype, _, tgt = Spring.GetUnitWeaponTarget(a, i)
+					if ttype == 1 then
+						state = state .. (tgt == target and " at own target" or (" at other unit " .. tostring(tgt)))
+					elseif ttype == 2 then
+						state = state .. " at ground"
+					else
+						state = state .. " no target"
+					end
+					-- which targeting condition fails against its own target
+					if reload <= lane.placedFrame then
+						local function yn(v) return v and "y" or "n" end
+						state = state .. string.format(" (try %s test %s range %s lof %s canfire %s)",
+							yn(Spring.GetUnitWeaponTryTarget(a, i, target)), yn(Spring.GetUnitWeaponTestTarget(a, i, target)),
+							yn(Spring.GetUnitWeaponTestRange(a, i, target)), yn(Spring.GetUnitWeaponHaveFreeLineOfFire(a, i, target)),
+							yn(Spring.GetUnitWeaponCanFire(a, i)))
+					end
+					parts[#parts + 1] = WeaponDefs[w.weaponDef].name .. state
 				end
+				local energy = Spring.GetTeamResources(Spring.GetUnitTeam(a), "energy")
+				parts[#parts + 1] = string.format("team energy %.0f", energy or -1)
 				local states = Spring.GetUnitStates(a) or {}
 				parts[#parts + 1] = "firestate " .. tostring(states.firestate) .. (Spring.GetUnitIsCloaked(a) and ", cloaked" or "")
 			end
@@ -175,11 +196,14 @@ return {
 				i = i + 1
 			end
 
-			ctx.call("clear")
-			ctx.waitSimFrames(2)
+			arena.sweep(ctx)
 			local placed = {}
+			local names = {}
+			for lane, c in ipairs(batch) do names[#names + 1] = c.name .. ":" .. c.def.name end
+			local batchInfo = " [batch: " .. table.concat(names, ", ") .. "]"
 			for lane, c in ipairs(batch) do
-				local z = (#batch == 1) and mapZ * 0.5 or (mapZ * 0.05 + (lane - 0.5) * spacing)
+				-- the usual lane position; centred only when a single lane is wider than the map
+				local z = (spacing > mapZ * 0.9) and mapZ * 0.5 or (mapZ * 0.05 + (lane - 0.5) * spacing)
 				local ids, err = ctx.call("place", c.def.name, me, enemy, z, c.dist)
 				local a, t = tostring(ids):match("^(%d+),(%d+)$")
 				if not a then
@@ -192,7 +216,8 @@ return {
 
 			local longest = 0
 			for _, c in ipairs(placed) do longest = math.max(longest, c.dist) end
-			ctx.waitSeconds(WAIT_SECONDS + RANGE_SECONDS * longest / 1000)
+			local waitSim = ctx.waitSimSeconds or ctx.waitSeconds
+			waitSim(WAIT_SECONDS + RANGE_SECONDS * longest / 1000)
 			for _, c in ipairs(placed) do
 				local r, err = ctx.call("damage", c.target)
 				local dmg, what = tostring(r):match("^(-?%d+)|(.*)$")
@@ -200,6 +225,7 @@ return {
 					ctx.check(c.name .. ":" .. c.def.name, false, tostring(err or r))
 				else
 					local damaged = tonumber(dmg) > 0
+					if damaged ~= c.expect then what = what .. batchInfo end
 					ctx.check(c.name .. ":" .. c.def.name, damaged == c.expect,
 						string.format("%s %.0f, distance %.0f, expected %s: took %s damage (%s)",
 							c.expect and "must-hit range" or "reach", c.range, c.dist, c.expect and "damage" or "no damage",

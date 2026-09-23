@@ -2,7 +2,7 @@
 -- arena in parallel lanes. Each type must arrive within a generous budget and never
 -- exceed its maxSpeed by more than 10%. Used by unit_movement (land) and
 -- ship_movement (flooded arena).
---   return VFS.Include("workbench/lib/movement.lua")(name, candidate, arenaHeight)
+--   return VFS.Include("workbench/lib/movement.lua")(name, candidate, arenaHeight, laneSpacing)
 local LANES = 24
 local LANE_SPACING = 140
 local DISTANCE = 1000
@@ -20,10 +20,12 @@ local function encode(t)
 	return table.concat(parts, ";")
 end
 
-return function(scenarioName, isCandidate, arenaHeight)
+return function(scenarioName, isCandidate, arenaHeight, laneSpacing)
+laneSpacing = laneSpacing or LANE_SPACING
 return {
 	name = scenarioName,
 	timeout = 3600,
+	simSpeed = "max", -- budgets are in sim frames
 	synced = {
 		prepare = arena.prepare,
 		clear = function()
@@ -33,7 +35,9 @@ return {
 		-- spawn one unit per lane; returns the number spawned
 		spawn = function(team, lane, defName)
 			local x0 = Game.mapSizeX * 0.5 - DISTANCE * 0.5
-			local z = Game.mapSizeZ * 0.5 + (lane - LANES * 0.5) * LANE_SPACING
+			-- lanes stay on the map: narrower than asked for on small maps
+			local spacing = math.min(laneSpacing, Game.mapSizeZ * 0.9 / LANES)
+			local z = Game.mapSizeZ * 0.5 + (lane - LANES * 0.5) * spacing
 			local u = Spring.CreateUnit(defName, x0, Spring.GetGroundHeight(x0, z), z, 1, team)
 			if u then tracked[u] = { lane = lane, name = defName, maxSpeed = 0 } end
 			return u or -1
@@ -62,13 +66,26 @@ return {
 			for u, t in pairs(tracked) do
 				local x = Spring.ValidUnitID(u) and select(1, Spring.GetUnitPosition(u)) or -1
 				local left = x >= 0 and math.max(0, tx - x) or -1
-				out[#out + 1] = string.format("%s,%.1f,%.3f", t.name, left, t.maxSpeed)
+				-- for a unit that fell short: its first queued commands
+				local cmds = {}
+				if left > 60 and Spring.ValidUnitID(u) then
+					for _, c in ipairs(Spring.GetUnitCommands(u, 3) or {}) do
+						cmds[#cmds + 1] = tostring(CMD[c.id] or c.id)
+					end
+				end
+				out[#out + 1] = string.format("%s,%.1f,%.3f,%s", t.name, left, t.maxSpeed,
+					#cmds > 0 and table.concat(cmds, "/") or "no commands")
 			end
 			return encode(out)
 		end,
 	},
 	run = function(ctx)
+		-- test units go to a team the local player does not control, so no player widget
+		-- (idle builders, auto-assist, ...) gives them orders at timing-dependent moments
 		local team = Spring.GetMyTeamID()
+		for _, t in ipairs(Spring.GetTeamList()) do
+			if t ~= team and t ~= Spring.GetGaiaTeamID() and not Spring.AreTeamsAllied(t, team) then team = t break end
+		end
 		local defs = {}
 		for _, def in pairs(UnitDefs) do
 			if isCandidate(def) and arena.wants(ctx, def.name) then defs[#defs + 1] = def end
@@ -78,7 +95,7 @@ return {
 		ctx.call("prepare", arenaHeight) -- flat arena: slopes change speeds and block paths
 
 		for first = 1, #defs, LANES do
-			ctx.call("clear")
+			arena.sweep(ctx)
 			local batch = {}
 			for lane = 1, math.min(LANES, #defs - first + 1) do
 				local def = defs[first + lane - 1]
@@ -104,14 +121,15 @@ return {
 
 			local rep = ctx.call("report") or ""
 			for entry in rep:gmatch("[^;]+") do
-				local name, left, maxSpeed = entry:match("([^,]+),([^,]+),([^,]+)")
+				local name, left, maxSpeed, cmds = entry:match("([^,]+),([^,]+),([^,]+),?([^,]*)")
 				local def = batch[name]
 				if def then
 					left, maxSpeed = tonumber(left), tonumber(maxSpeed)
 					-- GetUnitVelocity speed is elmos/frame; UnitDef speed is elmos/second
 					local maxSpeedPerSec = maxSpeed * Game.gameSpeed
 					ctx.check("arrive:" .. name, left >= 0 and left < 60,
-						string.format("%.0f elmos short after %.0f s (speed %.1f)", left, budgetFrames / Game.gameSpeed, def.speed))
+						string.format("%.0f elmos short after %.0f s (speed %.1f)%s", left, budgetFrames / Game.gameSpeed, def.speed,
+							left >= 60 and ("; commands: " .. cmds) or ""))
 					ctx.check("speed:" .. name, maxSpeedPerSec <= def.speed * SPEED_TOLERANCE,
 						string.format("max observed %.1f vs maxSpeed %.1f", maxSpeedPerSec, def.speed))
 				end

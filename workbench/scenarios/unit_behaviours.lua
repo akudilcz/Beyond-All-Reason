@@ -7,6 +7,7 @@
 -- Budgets come from the build times in the defs (x2 plus slack), so a check fails when
 -- a unit cannot do its job at all or is far slower than its stats say, not on jitter.
 local arena = VFS.Include("workbench/lib/arena.lua")
+local techtree = VFS.Include("workbench/lib/techtree.lua")
 
 local SPACING = 320
 local SLACK_SECONDS = 15
@@ -54,23 +55,21 @@ local function create(defName, x, z, facing, team)
 	return Spring.CreateUnit(defName, x, Spring.GetGroundHeight(x, z), z, facing or 0, team)
 end
 
--- a finished unit of defName near (x, z)
-local function finishedNear(defName, x, z, radius, team)
-	local id = UnitDefNames[defName].id
-	for _, u in ipairs(Spring.GetUnitsInCylinder(x, z, radius, team)) do
-		if Spring.GetUnitDefID(u) == id and not Spring.GetUnitIsBeingBuilt(u) then return u end
-	end
-end
-
-local jobs = {} -- synced: index -> { kind, maker, product, x, z }
+-- synced: index -> { maker, product, x, z, done }; a job is done when a unit of its
+-- product type that its maker started is finished (UnitCreated gives the builder, so a
+-- fast unit that drives off before the next poll still counts)
+local jobs = {}
+local jobOfMaker = {} -- maker unitID -> job index
+local jobOfProduct = {} -- product unitID under construction -> job index
 
 return {
 	name = "unit_behaviours",
 	timeout = 3600,
+	simSpeed = "max", -- budgets are in sim frames
 	synced = {
 		prepare = arena.prepare,
 		clear = function()
-			jobs = {}
+			jobs, jobOfMaker, jobOfProduct = {}, {}, {}
 			return arena.clear()
 		end,
 		-- places a factory or builder at grid slot i and orders it to make `product`
@@ -83,18 +82,33 @@ return {
 			if kind == "produce" then
 				Spring.GiveOrderToUnit(maker, -pid, {}, 0)
 			else
-				local bx = x + SPACING * 0.4
+				-- clear of the builder's own footprint (big builders block a close site)
+				local md, pd = UnitDefNames[makerName], UnitDefNames[productName]
+				local bx = x + (md.xsize + pd.xsize) * 4 + 48
 				Spring.GiveOrderToUnit(maker, -pid, { bx, Spring.GetGroundHeight(bx, z), z, 0 }, 0)
 			end
 			jobs[i] = { maker = maker, product = productName, x = x, z = z }
+			jobOfMaker[maker] = i
 			return 0
+		end,
+		-- why job i is not done: whether its product was started, by whom, how far
+		jobStatus = function(i)
+			local j = jobs[i]
+			if not j then return "no job" end
+			local cmd = (Spring.GetUnitCommands(j.maker, 1) or {})[1]
+			local doing = cmd and (cmd.id < 0 and ("building " .. UnitDefs[-cmd.id].name) or tostring(CMD[cmd.id] or cmd.id)) or "idle"
+			if j.productID and Spring.ValidUnitID(j.productID) then
+				local _, _, _, _, progress = Spring.GetUnitHealth(j.productID)
+				return string.format("started by %s, %.0f%% built; maker %s", j.startedBy, (progress or 0) * 100, doing)
+			end
+			return (j.productID and "product destroyed" or "never started") .. "; maker " .. doing
 		end,
 		-- comma-separated indices of the jobs whose product is finished
 		jobsDone = function(team)
 			unlimitedResources(team)
 			local done = {}
 			for i, j in pairs(jobs) do
-				if finishedNear(j.product, j.x, j.z, SPACING * 0.9, team) then done[#done + 1] = i end
+				if j.done then done[#done + 1] = i end
 			end
 			return table.concat(done, ",")
 		end,
@@ -153,6 +167,22 @@ return {
 			return radar .. "," .. los
 		end,
 	},
+	syncedCallins = {
+		UnitCreated = function(unitID, unitDefID, _, builderID)
+			-- some builders build through an attached construction turret (BAR's
+			-- attached_con_turret, e.g. corvac): the turret is the builder
+			local i = builderID and (jobOfMaker[builderID] or jobOfMaker[Spring.GetUnitTransporter(builderID) or -1])
+			if i and jobs[i] and UnitDefs[unitDefID].name == jobs[i].product then
+				jobOfProduct[unitID] = i
+				jobs[i].productID = unitID
+				jobs[i].startedBy = UnitDefs[Spring.GetUnitDefID(builderID)].name
+			end
+		end,
+		UnitFinished = function(unitID)
+			local i = jobOfProduct[unitID]
+			if i and jobs[i] then jobs[i].done = true end
+		end,
+	},
 	run = function(ctx)
 		local me = Spring.GetMyTeamID()
 		local enemy
@@ -164,8 +194,7 @@ return {
 
 		-- 1+2: production and construction, all jobs of a kind in parallel
 		local function runJobs(kind, list)
-			ctx.call("clear")
-			ctx.waitSimFrames(2)
+			arena.sweep(ctx)
 			local budget = 0
 			for i, j in ipairs(list) do
 				local r, err = ctx.call("startJob", me, i, kind, j.maker.name, j.product.name)
@@ -173,7 +202,8 @@ return {
 					ctx.check(kind .. ":" .. j.maker.name, false, tostring(err or r))
 					j.failed = true
 				end
-				local seconds = j.product.buildTime / math.max(1, j.maker.buildSpeed)
+				local turret = j.maker.customParams and UnitDefNames[j.maker.customParams.attached_con_turret or ""]
+				local seconds = j.product.buildTime / math.max(1, turret and turret.buildSpeed or j.maker.buildSpeed)
 				budget = math.max(budget, seconds * 2 + SLACK_SECONDS)
 			end
 			ctx.log(string.format("%d %s jobs, budget %.0f s", #list, kind, budget))
@@ -189,17 +219,19 @@ return {
 					if not j.failed and not j.done then pending = pending + 1 end
 				end
 			end
-			for _, j in ipairs(list) do
+			for i, j in ipairs(list) do
 				if not j.failed then
+					local why = j.done and "" or ("; " .. tostring(ctx.call("jobStatus", i)))
 					ctx.check(kind .. ":" .. j.maker.name, j.done,
-						string.format("%s %s within %.0f s", j.done and "made" or "did not make", j.product.name, budget))
+						string.format("%s %s within %.0f s%s", j.done and "made" or "did not make", j.product.name, budget, why))
 				end
 			end
 		end
 
 		local factories, builders = {}, {}
 		for _, def in pairs(UnitDefs) do
-			if playable(def) and def.buildOptions and #def.buildOptions > 0 and landOK(def) and arena.wants(ctx, def.name) then
+			if playable(def) and def.buildOptions and #def.buildOptions > 0 and landOK(def) and arena.wants(ctx, def.name)
+				and techtree.reachable()[def.name] then -- only what players can build
 				if def.isFactory then
 					local p = cheapestOption(def, isMobile)
 					if p then factories[#factories + 1] = { maker = def, product = p } end
@@ -242,7 +274,8 @@ return {
 			ctx.check("cloak", false, tostring(cerr or spy))
 		else
 			local cloaked = ctx.waitUntil(function() return ctx.call("isCloaked", me, spy) == 1 end, 15)
-			ctx.waitSeconds(5)
+			local waitSim = ctx.waitSimSeconds or ctx.waitSeconds
+			waitSim(5)
 			local stays = ctx.call("isCloaked", me, spy) == 1
 			ctx.check("cloak", cloaked and stays, string.format("cloaked %s, still cloaked after 5 s %s", tostring(cloaked), tostring(stays)))
 		end

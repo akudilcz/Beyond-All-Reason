@@ -19,6 +19,7 @@ local lanes = {}
 return {
 	name = "air_attack",
 	timeout = 3600,
+	simSpeed = "max", -- budgets are in sim frames
 	synced = {
 		prepare = arena.prepare,
 		clear = function()
@@ -87,8 +88,7 @@ return {
 
 		local perBatch = math.max(1, math.floor(Game.mapSizeZ * 0.8 / LANE_SPACING))
 		for first = 1, #defs, perBatch do
-			ctx.call("clear")
-			ctx.waitSimFrames(2)
+			arena.sweep(ctx)
 			local batch, slowest = {}, math.huge
 			for lane = 1, math.min(perBatch, #defs - first + 1) do
 				local def = defs[first + lane - 1]
