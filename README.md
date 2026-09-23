@@ -1,3 +1,17 @@
+# akudilcz/Beyond-All-Reason: the game half of a high-performance, well-tested BAR variant
+
+This fork of [Beyond All Reason](https://github.com/beyond-all-reason/Beyond-All-Reason) pairs with the engine fork [akudilcz/RecoilEngine](https://github.com/akudilcz/RecoilEngine). Together they keep a **faster, bug-free variant of the game** running. See the engine fork's README for the full picture.
+
+What this fork adds on top of upstream:
+
+- **Fixes**: box selection and building placement that stopped working at low frame rates with many units (SmartSelect now recomputes from the final drag box on release), and the context-build widget's update throttle, which was inverted.
+- **Reviewed community fixes** that upstream hasn't merged yet (for example #9214, area commands only target units that can perform them; #9323, a terraform-brush crash).
+- **Workbench scenario pack** *(in development)*: BAR-specific scenarios for the engine's Recoil Workbench (mass movement, battles, per-unit weapon range, movement and behaviour checks, low-FPS UI regression tests, replay determinism).
+
+Merge rules: low-to-medium-risk bug fixes, performance work and minor UX/gameplay improvements, each reviewed first. No major rewrites, and no default control or balance changes. `origin` is upstream, `fork` is this repository; sync with `git fetch origin && git merge origin/master`.
+
+---
+
 # Beyond-All-Reason
 
 ![Discord](https://img.shields.io/discord/225695362004811776)
