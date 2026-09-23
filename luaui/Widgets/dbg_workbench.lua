@@ -24,6 +24,12 @@ function widget:GameStart()
 	harness.Start()
 end
 
+function widget:GameFrame()
+	if harness then
+		harness.GameFrame()
+	end
+end
+
 function widget:Update()
 	if harness and Spring.GetGameFrame() > 0 then
 		harness.Update()
