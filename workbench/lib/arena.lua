@@ -11,7 +11,8 @@ local ARENA_HEIGHT = 200 -- above the water line
 local preexisting = {}
 local M = {}
 
-function M.prepare()
+-- height: ground level for the whole map (default above water; negative floods it)
+function M.prepare(height)
 	for _, u in ipairs(Spring.GetAllUnits()) do
 		preexisting[u] = true
 		Spring.GiveOrderToUnit(u, CMD.FIRE_STATE, { 0 }, 0) -- hold fire
@@ -21,7 +22,7 @@ function M.prepare()
 	for _, f in ipairs(Spring.GetAllFeatures()) do
 		Spring.DestroyFeature(f)
 	end
-	Spring.LevelHeightMap(0, 0, Game.mapSizeX, Game.mapSizeZ, ARENA_HEIGHT)
+	Spring.LevelHeightMap(0, 0, Game.mapSizeX, Game.mapSizeZ, tonumber(height) or ARENA_HEIGHT)
 	for _, a in ipairs(Spring.GetAllyTeamList()) do
 		Spring.SetGlobalLos(a, false) -- an earlier scenario may have turned it on
 	end

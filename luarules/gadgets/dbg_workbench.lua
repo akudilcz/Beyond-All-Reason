@@ -27,3 +27,13 @@ end
 function gadget:RecvLuaMsg(msg, playerID)
 	return harness.RecvSynced(msg)
 end
+
+-- forward the synced callins scenarios may handle (engines whose harness predates them
+-- have no SyncedCallin)
+if harness.SyncedCallin then
+	for _, name in ipairs(harness.SYNCED_CALLINS) do
+		gadget[name] = function(_, ...)
+			harness.SyncedCallin(name, ...)
+		end
+	end
+end
