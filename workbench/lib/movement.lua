@@ -71,7 +71,7 @@ return {
 		local team = Spring.GetMyTeamID()
 		local defs = {}
 		for _, def in pairs(UnitDefs) do
-			if isCandidate(def) then defs[#defs + 1] = def end
+			if isCandidate(def) and arena.wants(ctx, def.name) then defs[#defs + 1] = def end
 		end
 		table.sort(defs, function(a, b) return a.name < b.name end)
 		ctx.log(#defs .. " unit types")

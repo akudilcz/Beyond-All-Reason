@@ -48,12 +48,7 @@ local function gridPos(i)
 end
 
 -- synced helpers
-local function unlimitedResources(team)
-	for _, r in ipairs({ "m", "e" }) do
-		Spring.SetTeamResource(team, r .. "s", 1e7)
-		Spring.SetTeamResource(team, r, 1e7)
-	end
-end
+local unlimitedResources = arena.unlimitedResources
 
 local function create(defName, x, z, facing, team)
 	return Spring.CreateUnit(defName, x, Spring.GetGroundHeight(x, z), z, facing or 0, team)
@@ -204,7 +199,7 @@ return {
 
 		local factories, builders = {}, {}
 		for _, def in pairs(UnitDefs) do
-			if playable(def) and def.buildOptions and #def.buildOptions > 0 and landOK(def) then
+			if playable(def) and def.buildOptions and #def.buildOptions > 0 and landOK(def) and arena.wants(ctx, def.name) then
 				if def.isFactory then
 					local p = cheapestOption(def, isMobile)
 					if p then factories[#factories + 1] = { maker = def, product = p } end

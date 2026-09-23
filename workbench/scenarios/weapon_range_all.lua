@@ -1,36 +1,47 @@
 -- Weapon range checks for every armed ground unit of the playable factions,
--- generated from UnitDefs/WeaponDefs. Each unit gets two independent cases, each
--- in its own lane: a stationary enemy structure just inside the unit's effective
--- range must take damage, one just outside (plus the target's radius, since range
--- is measured to its edge) must not.
+-- generated from UnitDefs/WeaponDefs, on a flat arena. Each unit gets two independent
+-- cases, each in its own lane, against a stationary enemy structure that cannot die
+-- (so every hit is observable and attributable):
+--   inside:  at 90% of the "must hit" range the target must take damage
+--   outside: at 110% of the "can reach" range plus the target's radius it must not
 --
--- "Effective range" only counts weapons that can hurt that structure on their own:
--- the weapon's target categories must include the target, and paralyzer (EMP),
--- manual-fire (D-gun style), stockpile and torpedo weapons are ignored. Units with
--- no such weapon are skipped (logged, not failed).
+-- Only weapons that can hurt the target count: real damage (not BAR's zero-damage
+-- `bogus` dummies such as the spies' crawl weapon), target categories that include
+-- the target, not paralyzer (EMP) and not manual-fire (D-gun style, never auto-fires).
+-- "Must hit" additionally ignores stockpile weapons (may have nothing in stock) and
+-- water/torpedo weapons (sea lasers only aim when submerged). "Can reach" includes
+-- stockpiles and adds half the weapon's area of effect (splash lands past the aim
+-- point). Units with no weapon that must hit are skipped (logged, not failed).
+--
+-- Every failure says what happened: which weapon of which unit hit the target (from
+-- the UnitDamaged callin) or, when nothing hit, which of the attacker's weapons fired.
 local TARGET = "armsolar"
 local MARGIN = 0.1
-local WAIT_SECONDS = 12
+local WAIT_SECONDS = 12 -- plus RANGE_SECONDS per 1000 elmos, for slow long-range shells
+local RANGE_SECONDS = 6
 local SPACING_FACTOR = 2.5
+local TARGET_HP = 1e6 -- unkillable within the test window
 
-local function effectiveRange(def, targetCats)
-	local best = 0
+-- synced state: target -> { attacker, placedFrame, hits = { "unit/weapon" = damage } }
+local lanes = {}
+
+local weapons = VFS.Include("workbench/lib/weapons.lua")
+local hurts = weapons.hurts
+
+-- mustHit: range within which the unit must be able to damage the target
+-- canReach: distance beyond which nothing it auto-fires may damage the target
+local function ranges(def, targetCats)
+	local mustHit, canReach = 0, 0
 	for _, w in ipairs(def.weapons or {}) do
 		local wd = WeaponDefs[w.weaponDef]
-		if wd and not wd.paralyzer and not wd.manualFire and not wd.stockpile and wd.type ~= "TorpedoLauncher" then
-			local targetable = true
-			if w.onlyTargets and next(w.onlyTargets) then
-				targetable = false
-				for cat in pairs(w.onlyTargets) do
-					if targetCats[cat] then targetable = true break end
-				end
-			end
-			if targetable then
-				best = math.max(best, wd.range or 0)
+		if hurts(w, wd, targetCats) then
+			canReach = math.max(canReach, (wd.range or 0) + (wd.damageAreaOfEffect or 0) * 0.5)
+			if not wd.stockpile and not wd.waterWeapon then
+				mustHit = math.max(mustHit, wd.range or 0)
 			end
 		end
 	end
-	return best
+	return mustHit, canReach
 end
 
 local function isGroundUnit(def)
@@ -44,38 +55,67 @@ local function isGroundUnit(def)
 	return true
 end
 
-local preexisting = {}
+local arena = VFS.Include("workbench/lib/arena.lua")
 
 return {
 	name = "weapon_range_all",
 	timeout = 7200,
 	synced = {
-		snapshot = function()
-			for _, u in ipairs(Spring.GetAllUnits()) do preexisting[u] = true end
-			return 0
-		end,
+		prepare = arena.prepare,
 		clear = function()
-			for _, u in ipairs(Spring.GetAllUnits()) do
-				if not preexisting[u] then Spring.DestroyUnit(u, false, true) end
-			end
-			return 0
+			lanes = {}
+			return arena.clear()
 		end,
-		-- one attacker + one target at `distance`; returns the target id or a message
+		-- one attacker + one unkillable target at `distance`; returns "attacker,target" or a message
 		place = function(attackerName, attackerTeam, targetTeam, laneZ, distance)
-			local x = Game.mapSizeX * 0.15
+			local x = Game.mapSizeX * 0.3 -- keep clear of the start positions
 			local a = Spring.CreateUnit(attackerName, x, Spring.GetGroundHeight(x, laneZ), laneZ, 1, attackerTeam)
 			local tx = x + distance
 			local t = Spring.CreateUnit(TARGET, tx, Spring.GetGroundHeight(tx, laneZ), laneZ, 3, targetTeam)
 			if not a or not t then
 				return "could not create " .. (a and TARGET or attackerName)
 			end
+			arena.unlimitedResources(attackerTeam) -- some weapons cost energy per shot
+			Spring.SetUnitMaxHealth(t, TARGET_HP)
+			Spring.SetUnitHealth(t, TARGET_HP)
 			Spring.MoveCtrl.Enable(a)
+			-- decloak: BAR's cloak widget sets hold fire on cloaked units of the local player
+			Spring.GiveOrderToUnit(a, CMD.CLOAK, { 0 }, 0)
 			Spring.GiveOrderToUnit(a, CMD.FIRE_STATE, { 2 }, 0)
+			lanes[t] = { attacker = a, placedFrame = Spring.GetGameFrame(), hits = {} }
 			Spring.SetGlobalLos(Spring.GetUnitAllyTeam(a), true)
-			return t
+			return a .. "," .. t
 		end,
-		health = function(unitID)
-			return Spring.ValidUnitID(unitID) and (Spring.GetUnitHealth(unitID)) or 0
+		-- "damageTaken|description": who hit the target with what, or which weapons fired
+		damage = function(target)
+			local lane = lanes[target]
+			if not lane or not Spring.ValidUnitID(target) then return "-1|target missing" end
+			local taken = TARGET_HP - Spring.GetUnitHealth(target)
+			local parts = {}
+			for what, dmg in pairs(lane.hits) do parts[#parts + 1] = string.format("%s %.0f", what, dmg) end
+			if #parts == 0 and not Spring.ValidUnitID(lane.attacker) then
+				parts[1] = "attacker died"
+			elseif #parts == 0 then
+				local a = lane.attacker
+				for i, w in ipairs(UnitDefs[Spring.GetUnitDefID(a)].weapons) do
+					local reload = Spring.GetUnitWeaponState(a, i, "reloadState") or 0
+					parts[#parts + 1] = WeaponDefs[w.weaponDef].name .. (reload > lane.placedFrame and " fired" or " idle")
+				end
+				local states = Spring.GetUnitStates(a) or {}
+				parts[#parts + 1] = "firestate " .. tostring(states.firestate) .. (Spring.GetUnitIsCloaked(a) and ", cloaked" or "")
+			end
+			table.sort(parts)
+			return string.format("%.0f|%s", taken, table.concat(parts, ", "))
+		end,
+	},
+	syncedCallins = {
+		UnitDamaged = function(unitID, _, _, damage, paralyzer, weaponDefID, _, attackerID, attackerDefID)
+			local lane = lanes[unitID]
+			if not lane or paralyzer then return end
+			local who = (attackerID == lane.attacker and "own " or "other ")
+				.. (attackerDefID and UnitDefs[attackerDefID] and UnitDefs[attackerDefID].name or "?")
+			local what = who .. "/" .. (WeaponDefs[weaponDefID] and WeaponDefs[weaponDefID].name or tostring(weaponDefID))
+			lane.hits[what] = (lane.hits[what] or 0) + damage
 		end,
 	},
 	run = function(ctx)
@@ -89,27 +129,29 @@ return {
 			return
 		end
 		local tdef = UnitDefNames[TARGET]
-		local maxHp, targetRadius, targetCats = tdef.health, tdef.radius or 0, tdef.modCategories or {}
+		local targetRadius, targetCats = tdef.radius or 0, tdef.modCategories or {}
 
 		-- one entry per (unit, case); long ranges are fine because each case has its own lane
 		local cases, skipped = {}, 0
 		for _, def in pairs(UnitDefs) do
-			if isGroundUnit(def) and def.weapons and #def.weapons > 0 then
-				local range = effectiveRange(def, targetCats)
-				if range <= 0 then
+			if isGroundUnit(def) and def.weapons and #def.weapons > 0 and arena.wants(ctx, def.name) then
+				local mustHit, canReach = ranges(def, targetCats)
+				local outside = canReach * (1 + MARGIN) + targetRadius
+				if mustHit <= 0 then
 					skipped = skipped + 1
-				elseif Game.mapSizeX * 0.15 + range * (1 + MARGIN) + targetRadius > Game.mapSizeX * 0.95 then
-					ctx.log("skipped " .. def.name .. ": range " .. range .. " longer than the map allows")
+				elseif Game.mapSizeX * 0.3 + outside > Game.mapSizeX * 0.95 then
+					ctx.log("skipped " .. def.name .. ": reach " .. canReach .. " longer than the map allows")
 					skipped = skipped + 1
 				else
-					cases[#cases + 1] = { def = def, range = range, name = "inside", dist = range * (1 - MARGIN), expect = true }
-					cases[#cases + 1] = { def = def, range = range, name = "outside", dist = range * (1 + MARGIN) + targetRadius, expect = false }
+					cases[#cases + 1] = { def = def, range = mustHit, name = "inside", dist = mustHit * (1 - MARGIN), expect = true }
+					cases[#cases + 1] = { def = def, range = canReach, name = "outside", dist = outside, expect = false }
 				end
 			end
 		end
 		table.sort(cases, function(a, b) return a.range < b.range end)
 		ctx.log(#cases .. " cases; " .. skipped .. " armed ground units have no weapon that can hurt a " .. TARGET)
-		ctx.call("snapshot")
+		ctx.call("prepare") -- flat, featureless arena; start commanders hold fire
+		ctx.waitSimFrames(5)
 
 		local mapZ = Game.mapSizeZ
 		local i = 1
@@ -129,25 +171,30 @@ return {
 			local placed = {}
 			for lane, c in ipairs(batch) do
 				local z = (#batch == 1) and mapZ * 0.5 or (mapZ * 0.05 + (lane - 0.5) * spacing)
-				local target, err = ctx.call("place", c.def.name, me, enemy, z, c.dist)
-				if type(target) ~= "number" then
-					ctx.check(c.name .. ":" .. c.def.name, false, tostring(err or target))
+				local ids, err = ctx.call("place", c.def.name, me, enemy, z, c.dist)
+				local a, t = tostring(ids):match("^(%d+),(%d+)$")
+				if not a then
+					ctx.check(c.name .. ":" .. c.def.name, false, tostring(err or ids))
 				else
-					c.target = target
+					c.attacker, c.target = tonumber(a), tonumber(t)
 					placed[#placed + 1] = c
 				end
 			end
 
-			ctx.waitSeconds(WAIT_SECONDS)
+			local longest = 0
+			for _, c in ipairs(placed) do longest = math.max(longest, c.dist) end
+			ctx.waitSeconds(WAIT_SECONDS + RANGE_SECONDS * longest / 1000)
 			for _, c in ipairs(placed) do
-				local hp, err = ctx.call("health", c.target)
-				if not hp then
-					ctx.check(c.name .. ":" .. c.def.name, false, err)
+				local r, err = ctx.call("damage", c.target)
+				local dmg, what = tostring(r):match("^(-?%d+)|(.*)$")
+				if not dmg then
+					ctx.check(c.name .. ":" .. c.def.name, false, tostring(err or r))
 				else
-					local damaged = hp < maxHp
+					local damaged = tonumber(dmg) > 0
 					ctx.check(c.name .. ":" .. c.def.name, damaged == c.expect,
-						string.format("effective range %.0f distance %.0f expected %s, target hp %.0f/%.0f",
-							c.range, c.dist, c.expect and "damage" or "no damage", hp, maxHp))
+						string.format("%s %.0f, distance %.0f, expected %s: took %s damage (%s)",
+							c.expect and "must-hit range" or "reach", c.range, c.dist, c.expect and "damage" or "no damage",
+							dmg, what))
 				end
 			end
 		end

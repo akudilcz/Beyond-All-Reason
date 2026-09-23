@@ -33,6 +33,7 @@ return {
 			if not a or not t then
 				return "could not create " .. (a and TARGET or attackerName)
 			end
+			arena.unlimitedResources(attackerTeam)
 			Spring.SetUnitMaxHealth(t, TARGET_HP)
 			Spring.SetUnitHealth(t, TARGET_HP)
 			Spring.SetGlobalLos(Spring.GetUnitAllyTeam(a), true)
@@ -71,7 +72,7 @@ return {
 		local targetCats = UnitDefNames[TARGET].modCategories or {}
 		local defs, skipped = {}, 0
 		for _, def in pairs(UnitDefs) do
-			if weapons.playable(def) and def.canFly and def.weapons and #def.weapons > 0 then
+			if weapons.playable(def) and def.canFly and def.weapons and #def.weapons > 0 and arena.wants(ctx, def.name) then
 				if weapons.canHurt(def, targetCats) and (def.speed or 0) > 0 then
 					defs[#defs + 1] = def
 				else

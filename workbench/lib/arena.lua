@@ -29,8 +29,12 @@ function M.prepare(height)
 	return 0
 end
 
--- removes everything created since prepare()
+-- removes everything created since prepare(), including projectiles still in flight
+-- (a slow shell from the last batch must not land on the next batch's target)
 function M.clear()
+	for _, p in ipairs(Spring.GetProjectilesInRectangle(0, 0, Game.mapSizeX, Game.mapSizeZ) or {}) do
+		Spring.DeleteProjectile(p)
+	end
 	for _, u in ipairs(Spring.GetAllUnits()) do
 		if not preexisting[u] then Spring.DestroyUnit(u, false, true) end
 	end
@@ -38,6 +42,19 @@ function M.clear()
 		Spring.DestroyFeature(f) -- wrecks of destroyed test units
 	end
 	return 0
+end
+
+-- fills a team's storage so energy- or metal-hungry weapons and builds never stall
+function M.unlimitedResources(team)
+	for _, r in ipairs({ "m", "e" }) do
+		Spring.SetTeamResource(team, r .. "s", 1e7)
+		Spring.SetTeamResource(team, r, 1e7)
+	end
+end
+
+-- honours run.py --filter in generated scenarios (engines before ctx.wants run everything)
+function M.wants(ctx, caseName)
+	return not ctx.wants or ctx.wants(caseName)
 end
 
 function M.isPreexisting(u)
