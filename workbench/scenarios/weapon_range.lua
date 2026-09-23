@@ -1,5 +1,7 @@
 -- Per-unit weapon range check for a sample of ground units: a stationary enemy
 -- target just inside maxWeaponRange must take damage; one just outside must not.
+-- The engine measures range to the target's edge, so "outside" adds the target's
+-- radius on top of the margin.
 local SAMPLE = { "armpw", "armrock", "armham", "corak", "corthud", "corstorm" }
 local TARGET = "armsolar"
 local MARGIN = 0.1 -- fraction of range
@@ -66,6 +68,7 @@ return {
 			return
 		end
 		local maxHp = UnitDefNames[TARGET].health
+		local targetRadius = UnitDefNames[TARGET].radius or 0
 		ctx.call("snapshot")
 
 		for _, name in ipairs(SAMPLE) do
@@ -74,7 +77,7 @@ return {
 			if range <= 0 then
 				ctx.check("range:" .. name, false, "unit missing or unarmed")
 			else
-				for _, case in ipairs({ { "inside", range * (1 - MARGIN), true }, { "outside", range * (1 + MARGIN), false } }) do
+				for _, case in ipairs({ { "inside", range * (1 - MARGIN), true }, { "outside", range * (1 + MARGIN) + targetRadius, false } }) do
 					ctx.call("clear")
 					local target, placeErr = ctx.call("place", name, me, enemy, case[2])
 					if type(target) ~= "number" then
