@@ -147,6 +147,9 @@ local dualScreen
 local vpy = select(spGetViewGeometry(), 4)
 local referenceSelection = {}
 local referenceSelectionTypes = {}
+-- screen corner the selection box is dragged from (the corner opposite the cursor)
+local selAnchorX, selAnchorY
+local updateSelection
 
 local function sort(v1, v2)
 	if v1 > v2 then
@@ -195,8 +198,19 @@ end
 function widget:SelectionChanged(sel)
 	-- Check if engine has just deselected via mouserelease on selectbox.
 	-- We want to ignore engine passed selection and make sure we retain smartselect state
-	if inSelection and not select(3, spGetMouseState()) then -- left mouse button
+	local mx, my, lmb = spGetMouseState()
+	if inSelection and not lmb then -- left mouse button
 		inSelection = false
+
+		-- This callin runs before widget:Update() in the frame the button is released, so
+		-- selectedUnits was computed from the previous frame's box. At low frame rates a
+		-- whole drag can happen in one or two frames and that box may be much smaller (or
+		-- empty), so recompute from the final box before overriding the engine selection.
+		if inMiniMapSel then
+			updateSelection(mx, my)
+		elseif selAnchorX then
+			updateSelection(mx, my, math.min(selAnchorX, mx), math.max(selAnchorY, my), math.max(selAnchorX, mx), math.min(selAnchorY, my))
+		end
 
 		if #sel == 0 and not select(2, spGetModKeyState()) then -- ctrl
 			-- if empty selection box and engine hardcoded deselect modifier is not
@@ -234,6 +248,7 @@ local function mousePress(x, y, button, hasMouseOwner) --function widget:MousePr
 	end
 
 	skipSel = false
+	selAnchorX, selAnchorY = x, y
 
 	referenceSelectionTypes = {}
 	for i = 1, #referenceSelection do
@@ -290,6 +305,11 @@ function widget:Update(dt)
 		return
 	end -- not in valid selection box (mouserelease/minimum threshold/chorded/etc)
 
+	if x1 then
+		selAnchorX = (math.abs(x - x1) < math.abs(x - x2)) and x2 or x1
+		selAnchorY = (math.abs(y - y1) < math.abs(y - y2)) and y2 or y1
+	end
+
 	if #referenceSelection == 0 then -- no point in inverting an empty selection
 		mods.deselect = false
 	end
@@ -303,6 +323,11 @@ function widget:Update(dt)
 	end
 	sec = 0
 
+	updateSelection(x, y, x1, y1, x2, y2)
+end
+
+-- computes and applies the selection for the given screen rectangle (or minimap drag)
+updateSelection = function(x, y, x1, y1, x2, y2)
 	-- get units under selection rectangle
 	local isGodMode = spIsGodModeEnabled()
 	local mouseSelection
