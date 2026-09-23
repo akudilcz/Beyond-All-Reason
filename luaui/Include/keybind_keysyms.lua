@@ -6,10 +6,10 @@
 local KEYSYMS = KEYSYMS
 
 if not KEYSYMS then
-	-- the header may be served by the engine (raw VFS mode wins over the game archive), whose
-	-- version builds KEYSYMS with setmetatable; give it read access to globals
-	local env = setmetatable({}, { __index = _G })
-	VFS.Include("luaui/Headers/keysym.h.lua", env)
+	local env = {}
+	-- VFS.ZIP: load the game's own header like barwidgets.lua does; in the default raw-first
+	-- mode the engine's LuaUI/Headers/keysym.h.lua shadows it, and that one needs setmetatable
+	VFS.Include("luaui/Headers/keysym.h.lua", env, VFS.ZIP)
 	KEYSYMS = env.KEYSYMS
 end
 
