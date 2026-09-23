@@ -199,7 +199,7 @@ end
 -- DrawWorld because update doesn't run pregame
 function widget:DrawWorld()
 	-- update only x times per second
-	if lastUpdateTime > currentTime() + updateRate then
+	if currentTime() < lastUpdateTime + updateRate then
 		return
 	end
 
