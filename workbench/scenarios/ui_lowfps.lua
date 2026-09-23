@@ -8,6 +8,7 @@
 -- 0/12 units; with it, 12/12. drag_build_one_frame guards low-fps drag-building but
 -- cannot catch a regression of the KeyInput modifier fix: emulated keys set modifier
 -- state directly instead of going through the SDL event batch where that bug lived.
+-- That fix is guarded by the engine unit test test_KeyInput instead.
 local STALL_MS = 120 -- ~8 fps
 local GROUP = 12
 
