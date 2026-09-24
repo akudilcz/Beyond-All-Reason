@@ -181,9 +181,14 @@ return {
 			debug.emulateKeyPress(0x130) -- left shift (SDL1 keysym, as the engine expects)
 			dragInOneFrame(ax, ay, bx, by, 1)
 			debug.emulateKeyRelease(0x130)
-			ctx.waitFrames(6)
+			local _, activeCmd = Spring.GetActiveCommand()
+			local selectedCount = #Spring.GetSelectedUnits()
+			-- orders reach the unit a sim frame or more later; under late-game load that can take a while
+			ctx.waitUntil(function() return (Spring.GetUnitCommandCount(builder) or 0) >= 2 end, 5)
 			local queued = Spring.GetUnitCommandCount(builder) or 0
-			ctx.check("drag_build_one_frame", queued >= 2, queued .. " build orders queued from a one-frame shift-drag at ~8 fps")
+			ctx.check("drag_build_one_frame", queued >= 2, string.format(
+				"%d build orders queued from a one-frame shift-drag%s (builder alive %s, %d selected, active command %s after the drag)",
+				queued, stallMs and " at ~8 fps" or "", tostring(Spring.ValidUnitID(builder) and not Spring.GetUnitIsDead(builder)), selectedCount, tostring(activeCmd)))
 		end
 
 		Spring.Workbench.SetFrameStall(0)
