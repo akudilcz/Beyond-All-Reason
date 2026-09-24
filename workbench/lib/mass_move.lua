@@ -48,13 +48,13 @@ return function(count, unitName)
 		},
 		run = function(ctx)
 			local team = Spring.GetMyTeamID()
-			local before = #Spring.GetTeamUnits(team)
 			local old = {} -- the team's units from before, not counted as progress
 			for _, u in ipairs(Spring.GetTeamUnits(team)) do old[u] = true end
 			ctx.call("snapshot")
-			ctx.call("spawn", team, count)
-			local spawned = ctx.waitUntil(function() return #Spring.GetTeamUnits(team) >= before + count end, 60)
-			local have = #Spring.GetTeamUnits(team) - before
+			-- the spawn's own count: the team's total also moves with units left over from
+			-- earlier scenarios (dying or being cleared meanwhile)
+			local have = tonumber(ctx.call("spawn", team, count)) or 0
+			local spawned = have >= count
 			-- a short spawn is reported but still measured (with what spawned): skipping the
 			-- window would silently drop the run from every timing comparison
 			ctx.check("spawned", spawned, have .. "/" .. count)
