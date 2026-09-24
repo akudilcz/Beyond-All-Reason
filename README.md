@@ -1,6 +1,6 @@
 # Beyond All Reason, tuned and tested
 
-**The game half of a BAR variant that plays smoother in big battles, keeps its controls working when the frame rate drops, and is checked unit by unit by a testbench that plays the game for you.**
+**The game half of a BAR variant that keeps its controls working when the frame rate drops, carries reviewed fixes upstream hasn't merged, and is checked unit by unit by a testbench that plays the game for you.**
 
 Pairs with the engine fork [akudilcz/RecoilEngine](https://github.com/akudilcz/RecoilEngine), which has the full story: performance patches, fixes and the Recoil Workbench. Built on upstream [Beyond All Reason](https://github.com/beyond-all-reason/Beyond-All-Reason) and kept level with it.
 
