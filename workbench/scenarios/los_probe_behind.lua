@@ -8,7 +8,9 @@ local arena = VFS.Include("workbench/lib/arena.lua")
 
 local BLOCKER = "armpw"
 -- part 2: rays that start just outside an ally's collision volume and point away from it
-local SURFACE_BLOCKERS = { "armpw", "corak", "armwar", "armham", "corthud", "armstump", "corraid", "armflash",
+-- (only units whose hits use the unit volume: with per-piece volumes, e.g. corraid, a piece
+-- can reach past the unit volume, so a "just outside" start is inside a piece: a real hit)
+local SURFACE_BLOCKERS = { "armpw", "corak", "armwar", "armham", "corthud", "armstump", "armflash",
 	"armck", "armllt", "corllt", "armsolar", "armmex", "armrad" }
 local SURFACE_ANGLES = { 30, 45, 60 } -- degrees from +x in the xz plane
 local SURFACE_GAPS = { 1, 4 }         -- elmos between the volume and the ray start
