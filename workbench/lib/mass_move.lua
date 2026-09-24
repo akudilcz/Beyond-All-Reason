@@ -46,8 +46,11 @@ return function(count, unitName)
 			ctx.call("snapshot")
 			ctx.call("spawn", team, count)
 			local spawned = ctx.waitUntil(function() return #Spring.GetTeamUnits(team) >= before + count end, 60)
-			ctx.check("spawned", spawned, (#Spring.GetTeamUnits(team) - before) .. "/" .. count)
-			if not spawned then
+			local have = #Spring.GetTeamUnits(team) - before
+			-- a short spawn is reported but still measured (with what spawned): skipping the
+			-- window would silently drop the run from every timing comparison
+			ctx.check("spawned", spawned, have .. "/" .. count)
+			if have <= 0 then
 				ctx.call("clear")
 				return
 			end
