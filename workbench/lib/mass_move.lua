@@ -25,12 +25,18 @@ return function(count, unitName)
 				local side = math.ceil(math.sqrt(n))
 				local spacing = 48
 				local x0, z0 = Game.mapSizeX * 0.1, Game.mapSizeZ * 0.1
-				for i = 0, n - 1 do
+				-- a few grid spots are blocked (cliffs, water, features) and CreateUnit refuses
+				-- them: move on to the next spot so the count is still n (same spots each run)
+				local made, i = 0, 0
+				while made < n and i < n * 2 do
 					local x = x0 + (i % side) * spacing
 					local z = z0 + math.floor(i / side) * spacing
-					Spring.CreateUnit(def.id, x, Spring.GetGroundHeight(x, z), z, 0, teamID)
+					if Spring.CreateUnit(def.id, x, Spring.GetGroundHeight(x, z), z, 0, teamID) then
+						made = made + 1
+					end
+					i = i + 1
 				end
-				return n
+				return made
 			end,
 			moveAll = function(teamID)
 				local tx, tz = Game.mapSizeX * 0.85, Game.mapSizeZ * 0.85
@@ -43,6 +49,8 @@ return function(count, unitName)
 		run = function(ctx)
 			local team = Spring.GetMyTeamID()
 			local before = #Spring.GetTeamUnits(team)
+			local old = {} -- the team's units from before, not counted as progress
+			for _, u in ipairs(Spring.GetTeamUnits(team)) do old[u] = true end
 			ctx.call("snapshot")
 			ctx.call("spawn", team, count)
 			local spawned = ctx.waitUntil(function() return #Spring.GetTeamUnits(team) >= before + count end, 60)
@@ -61,7 +69,7 @@ return function(count, unitName)
 			local progressed = 0
 			for _, u in ipairs(Spring.GetTeamUnits(team)) do
 				local x, _, z = Spring.GetUnitPosition(u)
-				if x and x > Game.mapSizeX * 0.3 then
+				if x and x > Game.mapSizeX * 0.3 and not old[u] then
 					progressed = progressed + 1
 				end
 			end
