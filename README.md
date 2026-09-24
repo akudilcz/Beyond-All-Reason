@@ -1,14 +1,38 @@
-# akudilcz/Beyond-All-Reason: the game half of a high-performance, well-tested BAR variant
+# Beyond All Reason, tuned and tested
 
-This fork of [Beyond All Reason](https://github.com/beyond-all-reason/Beyond-All-Reason) pairs with the engine fork [akudilcz/RecoilEngine](https://github.com/akudilcz/RecoilEngine). Together they keep a **faster, bug-free variant of the game** running. See the engine fork's README for the full picture.
+**The game half of a BAR variant that plays smoother in big battles, keeps its controls working when the frame rate drops, and is checked unit by unit by a testbench that plays the game for you.**
 
-What this fork adds on top of upstream:
+Pairs with the engine fork [akudilcz/RecoilEngine](https://github.com/akudilcz/RecoilEngine), which has the full story: performance patches, fixes and the Recoil Workbench. Built on upstream [Beyond All Reason](https://github.com/beyond-all-reason/Beyond-All-Reason) and kept level with it.
 
-- **Fixes**: box selection and building placement that stopped working at low frame rates with many units (SmartSelect now recomputes from the final drag box on release), and the context-build widget's update throttle, which was inverted.
-- **Reviewed community fixes** that upstream hasn't merged yet (for example #9214, area commands only target units that can perform them; #9331, geothermal vents placed twice; #8076, partly translated locales falling back per key).
-- **Workbench scenario pack** *(in development)*: BAR-specific scenarios for the engine's Recoil Workbench (mass movement, battles, per-unit weapon range, movement and behaviour checks, low-FPS UI regression tests, replay determinism).
+## For players
 
-Merge rules: low-to-medium-risk bug fixes, performance work and minor UX/gameplay improvements, each reviewed first. No major rewrites, and no default control or balance changes. `origin` is upstream, `fork` is this repository; sync with `git fetch origin && git merge origin/master`.
+- **Box selection that works in huge battles.** With hundreds of units and a low frame rate, dragging a selection box could select nothing, because the whole drag landed in one frame. SmartSelect now uses the final box when you release.
+- **Drag-building that works at low FPS.** Shift-dragging a row of buildings works again when the game is struggling (the fix is in the engine fork; use both together).
+- **Community fixes upstream hasn't merged yet**, each reviewed first. For example #9214 (area commands only target units that can carry them out), #9331 (geothermal vents some maps place twice) and #8076 (partly translated languages fall back to English per line instead of showing blanks).
+- **Same balance, same controls.** No unit stats or default keybindings are changed.
+
+There are no prebuilt downloads yet; see the engine fork for building and running it.
+
+## For developers
+
+**Every unit, checked every run.** The `workbench/` scenario pack drives the engine's Recoil Workbench with checks generated from the unit definitions, so new units are covered automatically:
+
+| Scenario | What it checks | Cases |
+|---|---|---|
+| `unit_movement`, `ship_movement` | every ground unit, ship and submarine arrives within budget and never exceeds its max speed | 450 |
+| `weapon_range_all` | every armed ground unit hits inside its range, and nothing it fires lands beyond its reach | 238 |
+| `air_attack` | every armed aircraft reaches and strikes a target | 18 |
+| `unit_behaviours` | every factory produces, every builder builds; transport, cloak, radar | 41 |
+| `ui_lowfps` | box select and drag-build with the whole gesture inside one ~8 fps frame | 2 |
+| `mass_move_*`, `big_battle`, `sync_repro` | performance at 500 to 5,000 units, and bit-identical replays | |
+
+All 747 logic checks run in about 3.5 minutes at up to 30x game speed, on a flat arena so they measure the unit, not the map. Failures say what happened, e.g. *"took 0 damage: weapon idle, target in range, line of fire blocked"*. Writing your own scenario takes one Lua file; see the engine fork's [workbench guide](https://github.com/akudilcz/RecoilEngine/blob/master/tools/workbench/README.md).
+
+**The Lua specs run locally** with busted (`busted --lua=lua5.1` from the repo root), or together with the engine's tests via the engine fork's `tools/workbench/test-all.sh`.
+
+## What gets in
+
+Low-to-medium-risk bug fixes, performance work and small UX improvements, each reviewed first. No rewrites of core systems, and no balance or default-control changes. `origin` is upstream and `fork` is this repository; we sync with `git fetch origin && git merge origin/master`.
 
 ---
 
