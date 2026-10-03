@@ -8,7 +8,7 @@ Pairs with the engine fork [akudilcz/RecoilEngine](https://github.com/akudilcz/R
 
 - **Box selection that works in huge battles.** With hundreds of units and a low frame rate, dragging a selection box could select nothing, because the whole drag landed in one frame. SmartSelect now uses the final box when you release.
 - **Drag-building that works at low FPS.** Shift-dragging a row of buildings works again when the game is struggling (the fix is in the engine fork; use both together).
-- **Community fixes upstream hasn't merged yet**, each reviewed first. For example #9214 (area commands only target units that can carry them out), #9331 (geothermal vents some maps place twice) and #8076 (partly translated languages fall back to English per line instead of showing blanks).
+- **Community fixes upstream hasn't merged yet**, each reviewed first. For example #9214 (area commands only target units that can carry them out) and #8076 (partly translated languages fall back to English per line instead of showing blanks).
 - **Same balance, same controls.** No unit stats or default keybindings are changed.
 
 There are no prebuilt downloads yet; see the engine fork for building and running it.
