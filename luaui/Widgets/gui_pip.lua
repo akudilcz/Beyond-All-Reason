@@ -76,7 +76,7 @@ end
 ----------------------------------------------------------------------------------------------------
 -- Keyboard config for hotkey display
 ----------------------------------------------------------------------------------------------------
-local keyConfig = VFS.Include("luaui/configs/keyboard_layouts.lua")
+local keyConfig = require("luaui/configs/keyboard_layouts")
 keyConfig._pipHotkeyCache = keyConfig._pipHotkeyCache or {}
 
 ----------------------------------------------------------------------------------------------------
@@ -161,7 +161,6 @@ config = {
 	activityFocusZoomOutTime = 1.3, -- Seconds for the zoom-out transition (smoothstep ease-in-out)
 	activityFocusZoom = 0.15, -- Zoom level when focusing on a marker (higher = more zoomed in)
 	activityFocusShowMinimap = true, -- Temporarily show pip-minimap overlay while focused on a map marker
-	activityFocusBlockIgnoredPlayers = true, -- Completely block activity focus for players on your ignore list (WG.ignoredAccounts)
 	activityFocusCooldown = 3, -- Minimum seconds between focus triggers from the same player
 	activityFocusThrottleWindow = 10, -- Time window (seconds) to count markers from a player
 	activityFocusThrottleCount = 3, -- After this many markers in the window, ignore that player temporarily
@@ -313,9 +312,17 @@ config = {
 	historyDeathReplayMinCost = 150, -- Only losses of at least this metal-equivalent cost count as a death to replay
 	historyDeathReplayZoom = 1.2, -- Zoom the death replay centres with (0 = leave the camera alone)
 	historyPlaybackRate = 60, -- Max layer re-renders per second while rewinding (live's max is pipMaxUpdateRate)
+	historyLosFrames = 15, -- Rewind LOS view: frames between rebuilds of the sight circles (also rebuilt when an ally appears or dies)
+	historyLosTerrain = true, -- Rewind LOS view: sight and radar rays are blocked by terrain
+	historyLosTerrainStep = 48, -- Elmos between terrain samples along a sight ray
+	historyScanSpread = 4, -- The recorder's unit scan runs over this many frames per tick
 	historyExplosions = true, -- Log explosions into the rewind history
 	historyProjectiles = true, -- Log long-flight projectiles (nukes, artillery, bombs)
 	historyCommands = true, -- Log position-targeted orders
+	historySelections = true, -- Log every player's selection (the tracked player's shows in the rewind)
+	historySelectionCap = 200, -- Units kept per selection record
+	historyCursors = true, -- Log player cursors (the tracked player's shows in the rewind)
+	historyResources = true, -- Log team resources (the tracked player's resource bars show them in the rewind)
 }
 
 -- State variables
@@ -459,6 +466,8 @@ local pipR2T = {
 	resbarTextLastUpdate = 0,
 	resbarTextUpdateRate = 0.5, -- Update resource text at 2 FPS
 	resbarTextLastPlayerID = nil,
+	resbarTextLastMode = nil, -- rewinding when the text was made
+	resbarTextLastFrame = nil, -- viewed rewind frame when the text was made
 	playerNameDlist = nil,
 	playerNameLastPlayerID = nil,
 	playerNameLastName = nil,
@@ -3063,19 +3072,20 @@ local shaders = {
 			infoTexMul = 0.0,
 		},
 	},
-	-- GL4 instanced decal overlay: GPU computes alpha fade, single draw call
-	-- Vertex reads per-instance decal data, geometry shader expands to rotated textured quad
-	-- Fragment converts atlas alpha to darkening value matching world shader appearance
-	-- Used with GL_MIN blending to avoid overlap edge artifacts
+	-- GL4 decal overlay, drawn from the Decals GL4 widget's instance VBOs (see decalGL4): GPU computes alpha
+	-- fade, fragment converts atlas alpha to a darkening value matching the world shader appearance.
+	-- Used with GL_MIN blending to avoid overlap edge artifacts.
+	-- decalCode: points + geometry shader (attributes from 0); decalCodeNoGS: instanced quads (from 1)
 	decal = nil,
+	decalGS = nil,
 	decalCode = {
 		vertex = [[
 #version 330
-// Per-instance decal data (one point = one decal)
-layout(location = 0) in vec4 posRot;        // worldX, worldZ, rotation (rad), maxalpha
-layout(location = 1) in vec4 sizeAlpha;     // halfLengthX, halfWidthZ, alphastart, alphadecay
-layout(location = 2) in vec4 uvCoords;      // p, q, s, t (atlas UV rect)
-layout(location = 3) in vec4 spawnParams;   // spawnframe, 0, 0, 0
+// Decals widget instance data (one point = one decal)
+layout(location = 0) in vec4 lengthwidthrotation; // length, width, rotation (rad), maxalpha
+layout(location = 1) in vec4 uv_atlaspos;         // p, q, s, t (atlas UV rect)
+layout(location = 2) in vec4 alphaParams;         // alphastart, alphadecay, heatstart, heatdecay
+layout(location = 3) in vec4 worldPos;            // x, y, z, spawnframe
 
 uniform float gameFrame;
 uniform vec2 invMapSize;  // 2/mapSizeX, 2/mapSizeZ (factor of 2 because NDC spans -1..1)
@@ -3088,9 +3098,9 @@ out float v_sinR;
 
 void main() {
 	// Compute current alpha on GPU (same formula as decals widget)
-	float lifetonow = gameFrame - spawnParams.x;
-	float currentAlpha = sizeAlpha.z - lifetonow * sizeAlpha.w;
-	currentAlpha = clamp(currentAlpha, 0.0, posRot.w);
+	float lifetonow = gameFrame - worldPos.w;
+	float currentAlpha = alphaParams.x - lifetonow * alphaParams.y;
+	currentAlpha = clamp(currentAlpha, 0.0, lengthwidthrotation.w);
 
 	// Skip expired/invisible decals
 	if (currentAlpha < 0.01) {
@@ -3100,17 +3110,17 @@ void main() {
 	}
 
 	v_alpha = currentAlpha;
-	v_uv = uvCoords;
+	v_uv = uv_atlaspos;
 
 	// World position to NDC (-1..1)
-	vec2 ndc = posRot.xy * invMapSize - 1.0;
+	vec2 ndc = worldPos.xz * invMapSize - 1.0;
 	gl_Position = vec4(ndc, 0.0, 1.0);
 
 	// Pass world-space half-sizes; geometry shader rotates THEN converts to NDC
-	v_halfWorld = sizeAlpha.xy;
+	v_halfWorld = lengthwidthrotation.xy * 0.5;
 
-	v_cosR = cos(posRot.z);
-	v_sinR = sin(posRot.z);
+	v_cosR = cos(lengthwidthrotation.z);
+	v_sinR = sin(lengthwidthrotation.z);
 }
 		]],
 		geometry = [[
@@ -3192,10 +3202,10 @@ void main() {
 		vertex = [[
 #version 330
 layout(location = 0) in vec2 quadPos;
-layout(location = 1) in vec4 posRot;        // worldX, worldZ, rotation (rad), maxalpha
-layout(location = 2) in vec4 sizeAlpha;     // halfLengthX, halfWidthZ, alphastart, alphadecay
-layout(location = 3) in vec4 uvCoords;      // p, q, s, t
-layout(location = 4) in vec4 spawnParams;   // spawnframe, 0, 0, 0
+layout(location = 1) in vec4 lengthwidthrotation; // length, width, rotation (rad), maxalpha
+layout(location = 2) in vec4 uv_atlaspos;         // p, q, s, t
+layout(location = 3) in vec4 alphaParams;         // alphastart, alphadecay, heatstart, heatdecay
+layout(location = 4) in vec4 worldPos;            // x, y, z, spawnframe
 
 uniform float gameFrame;
 uniform vec2 invMapSize;
@@ -3204,9 +3214,9 @@ out vec2 f_texCoord;
 out float f_alpha;
 
 void main() {
-	float lifetonow = gameFrame - spawnParams.x;
-	float currentAlpha = sizeAlpha.z - lifetonow * sizeAlpha.w;
-	currentAlpha = clamp(currentAlpha, 0.0, posRot.w);
+	float lifetonow = gameFrame - worldPos.w;
+	float currentAlpha = alphaParams.x - lifetonow * alphaParams.y;
+	currentAlpha = clamp(currentAlpha, 0.0, lengthwidthrotation.w);
 	if (currentAlpha < 0.01) {
 		f_alpha = 0.0;
 		gl_Position = vec4(2.0, 2.0, 0.0, 1.0);
@@ -3214,17 +3224,17 @@ void main() {
 	}
 
 	f_alpha = currentAlpha;
-	vec2 centerNDC = posRot.xy * invMapSize - 1.0;
+	vec2 centerNDC = worldPos.xz * invMapSize - 1.0;
 
-	float ca = cos(posRot.z);
-	float sa = sin(posRot.z);
-	vec2 local = quadPos * sizeAlpha.xy;
+	float ca = cos(lengthwidthrotation.z);
+	float sa = sin(lengthwidthrotation.z);
+	vec2 local = quadPos * (lengthwidthrotation.xy * 0.5);
 	vec2 rotatedWorld = vec2(local.x * ca - local.y * sa, local.x * sa + local.y * ca);
 	vec2 ndcOff = rotatedWorld * invMapSize;
 	gl_Position = vec4(centerNDC + ndcOff, 0.0, 1.0);
 
 	vec2 t = quadPos * 0.5 + 0.5;
-	f_texCoord = vec2(mix(uvCoords.x, uvCoords.y, t.x), mix(uvCoords.z, uvCoords.w, t.y));
+	f_texCoord = vec2(mix(uv_atlaspos.x, uv_atlaspos.y, t.x), mix(uv_atlaspos.z, uv_atlaspos.w, t.y));
 }
 		]],
 		fragment = [[
@@ -9155,7 +9165,7 @@ function widget:Initialize()
 		glFunc.Texture(false)
 	end)
 
-	local iconTypes = VFS.Include("gamedata/icontypes.lua")
+	local iconTypes = require("gamedata/icontypes")
 	for uDefID, uDef in pairs(UnitDefs) do
 		cache.xsizes[uDefID] = uDef.xsize * 4
 		cache.zsizes[uDefID] = uDef.zsize * 4
@@ -9329,18 +9339,15 @@ function widget:Initialize()
 		shaders.losShowRadarLoc = gl.GetUniformLocation(shaders.los, "showRadar")
 	end
 
-	-- Initialize decal overlay shader + GL4 VBO/VAO
+	-- Initialize decal overlay shaders + GL4 quad VBO
 	if pipUseGeometryShader then
-		shaders.decal = gl.CreateShader(shaders.decalCode)
-		decalGL4.useGeometryShader = (shaders.decal ~= nil)
-		if not shaders.decal then
-			shaders.decal = gl.CreateShader(shaders.decalCodeNoGS)
-			decalGL4.useGeometryShader = false
+		shaders.decalGS = gl.CreateShader(shaders.decalCode)
+		if not shaders.decalGS then
+			Spring.Echo("PIP: Failed to compile decal geometry shader")
+			Spring.Echo("PIP: Shader log: " .. (gl.GetShaderLog() or "no log"))
 		end
-	else
-		decalGL4.useGeometryShader = false
-		shaders.decal = gl.CreateShader(shaders.decalCodeNoGS)
 	end
+	shaders.decal = gl.CreateShader(shaders.decalCodeNoGS)
 	if not shaders.decal then
 		Spring.Echo("PIP: Failed to compile decal shader")
 		Spring.Echo("PIP: Shader log: " .. (gl.GetShaderLog() or "no log"))
@@ -10440,6 +10447,10 @@ function widget:PlayerChanged(playerID)
 end
 
 function widget:SelectedUnitsClear(playerID)
+	local selDirty = miscState.hist.selDirty
+	if selDirty then
+		selDirty[playerID] = true
+	end
 	if CanSkipUntrackedSelectionUpdate(playerID) then
 		return
 	end
@@ -10449,6 +10460,10 @@ function widget:SelectedUnitsClear(playerID)
 end
 
 function widget:SelectedUnitsSet(playerID, units, unitCount)
+	local selDirty = miscState.hist.selDirty
+	if selDirty then
+		selDirty[playerID] = true
+	end
 	if CanSkipUntrackedSelectionUpdate(playerID) then
 		return
 	end
@@ -10465,6 +10480,10 @@ function widget:SelectedUnitsSet(playerID, units, unitCount)
 end
 
 function widget:SelectedUnitsAdd(playerID, unitID)
+	local selDirty = miscState.hist.selDirty
+	if selDirty then
+		selDirty[playerID] = true
+	end
 	if CanSkipUntrackedSelectionUpdate(playerID) then
 		return
 	end
@@ -10475,6 +10494,10 @@ function widget:SelectedUnitsAdd(playerID, unitID)
 end
 
 function widget:SelectedUnitsRemove(playerID, unitID)
+	local selDirty = miscState.hist.selDirty
+	if selDirty then
+		selDirty[playerID] = true
+	end
 	if CanSkipUntrackedSelectionUpdate(playerID) then
 		return
 	end
@@ -10487,6 +10510,10 @@ function widget:SelectedUnitsRemove(playerID, unitID)
 end
 
 function widget:SelectedUnitsBatchUpdate(playerID, addUnits, addCount, remUnits, remCount)
+	local selDirty = miscState.hist.selDirty
+	if selDirty then
+		selDirty[playerID] = true
+	end
 	if CanSkipUntrackedSelectionUpdate(playerID) then
 		return
 	end
@@ -10607,6 +10634,10 @@ function widget:Shutdown()
 		if shaders.decal then
 			gl.DeleteShader(shaders.decal)
 			shaders.decal = nil
+		end
+		if shaders.decalGS then
+			gl.DeleteShader(shaders.decalGS)
+			shaders.decalGS = nil
 		end
 
 		if shaders.decalBlit then
@@ -10981,7 +11012,8 @@ function widget:SetConfigData(data)
 	if type(data.historySpeed) == "number" and data.historySpeed >= 1 and data.historySpeed <= 24 then
 		miscState.hist.speed = data.historySpeed
 	end
-	miscState.hist.shown = data.historyStripShown == true
+	-- the open timeline only survives a /luaui reload of the same game
+	miscState.hist.shown = data.historyStripShown == true and isSameGame
 	if data.healthDarkenMax ~= nil then
 		config.healthDarkenMax = data.healthDarkenMax
 	end
@@ -12481,8 +12513,9 @@ local function GL4DrawIcons(checkAllyTeamID, selectedSet, trackingSet)
 						if not isBuildingLike then
 							isRadar = true
 						end
+						-- the engine's rule: seen before and radar contact kept since (both bits)
 						local typed = (losBits % (LOS_PREVLOS * 2) >= LOS_PREVLOS)
-							or (losBits % (LOS_CONTRADAR * 2) >= LOS_CONTRADAR)
+							and (losBits % (LOS_CONTRADAR * 2) >= LOS_CONTRADAR)
 						if not (typed and uDefID) then
 							visibleDefID = nil
 						end
@@ -13870,12 +13903,12 @@ end
 -- Lua's 200-local limit)
 ----------------------------------------------------------------------------------------------------
 
--- Park-Miller generator: playback effects re-roll identically when a frame is scrubbed again
+-- Lehmer generator: playback effects re-roll identically when a frame is scrubbed again
 function miscState.hist.Rand(seed)
-	seed = (math.floor(seed) % 2147483646) + 1
+	seed = (math.floor(seed) % 65536) + 1
 	return function()
-		seed = (seed * 16807) % 2147483647
-		return seed / 2147483647
+		seed = (seed * 75) % 65537
+		return seed / 65537
 	end
 end
 
@@ -13895,6 +13928,13 @@ function miscState.hist.StoreOptions()
 		beamWeapon = cache.weaponHistoryBeam,
 		weaponRadius = cache.weaponExplosionRadius,
 		playerCameras = miscState.hist.PlayerCameras,
+		logSelections = config.historySelections,
+		selectionCap = math.max(1, math.floor(config.historySelectionCap)),
+		playerSelections = miscState.hist.PlayerSelections,
+		logCursors = config.historyCursors,
+		playerCursors = miscState.hist.PlayerCursors,
+		logResources = config.historyResources,
+		scanSpread = math.max(1, math.floor(config.historyScanSpread)),
 		spillBytes = math.max(0.01, config.historySpillMB) * 1024 * 1024,
 		basicLevel = math.max(0, math.floor(config.historyBasicLevel)),
 		loadedSegments = math.max(1, math.floor(config.historyLoadedSegments)),
@@ -13917,7 +13957,6 @@ function miscState.hist.StripH()
 		or not config.historyEnabled
 		or not hist.store
 		or uiState.inMinMode
-		or miscState.engineMinimapActive
 		or (isMinimapMode and miscState.minimapMinimized)
 	then
 		return 0
@@ -14127,6 +14166,150 @@ function miscState.hist.PlayerCameras()
 	return list
 end
 
+-- selections for the recorder: playerID -> set of unit ids, only the players whose selection
+-- changed since the last call (all of them when `all`); spectators are skipped, the own
+-- selection comes from the engine
+function miscState.hist.PlayerSelections(all)
+	local api = WG.allyselectedunits
+	local get = api and api.getPlayerSelectedUnits
+	if not get then
+		return nil
+	end
+	local hist = miscState.hist
+	local out, dirty = hist.selOut, hist.selDirty
+	if not out then
+		out, dirty = {}, {}
+		hist.selOut, hist.selDirty, hist.selEmpty, hist.selOwn = out, dirty, {}, {}
+	end
+	for pid in pairs(out) do
+		out[pid] = nil
+	end
+	local myPlayerID = Spring.GetMyPlayerID()
+	local players = Spring.GetPlayerList()
+	for i = 1, #players do
+		local pid = players[i]
+		local _, _, isSpec = Spring.GetPlayerInfo(pid, false)
+		if isSpec then
+			dirty[pid] = nil
+		elseif pid == myPlayerID then
+			-- the ally widget does not carry the local selection
+			local own = hist.selOwn
+			for k in pairs(own) do
+				own[k] = nil
+			end
+			local sel = Spring.GetSelectedUnits()
+			for k = 1, #sel do
+				own[sel[k]] = true
+			end
+			out[pid] = own
+		elseif all or dirty[pid] then
+			out[pid] = get(pid) or hist.selEmpty
+		end
+	end
+	for pid in pairs(dirty) do
+		dirty[pid] = nil
+	end
+	return out
+end
+
+-- cursors for the recorder: {playerID, x, z} per non-spectator that moved recently
+function miscState.hist.PlayerCursors()
+	local ac = WG.allycursors
+	if not (ac and ac.getCursors) then
+		return nil
+	end
+	local cursors, notIdle = ac.getCursors()
+	if not (cursors and notIdle) then
+		return nil
+	end
+	local hist = miscState.hist
+	local list = hist.curList
+	if not list then
+		list = {}
+		hist.curList = list
+	end
+	local n = 0
+	local myPlayerID = Spring.GetMyPlayerID()
+	for pid, cursor in pairs(cursors) do
+		local _, _, isSpec = Spring.GetPlayerInfo(pid, false)
+		if notIdle[pid] and cursor[1] and cursor[3] and pid ~= myPlayerID and not isSpec then
+			n = n + 1
+			local c = list[n]
+			if not c then
+				c = {}
+				list[n] = c
+			end
+			c[1], c[2], c[3] = pid, cursor[1], cursor[3]
+		end
+	end
+	-- the local cursor is not in the broadcast: trace it once per tick
+	local mx, my = Spring.GetMouseState()
+	local kind, pos = Spring.TraceScreenRay(mx, my, true)
+	if kind == "ground" and pos and not cameraState.mySpecState then
+		n = n + 1
+		local c = list[n]
+		if not c then
+			c = {}
+			list[n] = c
+		end
+		c[1], c[2], c[3] = myPlayerID, pos[1], pos[3]
+	end
+	for i = n + 1, #list do
+		list[i] = nil
+	end
+	return list
+end
+
+-- recorded cursors in the live ally-cursor API's shape, for the viewed frame
+function miscState.hist.CursorApi()
+	local hist = miscState.hist
+	local api = hist.cursorApi
+	if api then
+		return api
+	end
+	local tbls, notIdle, cursors = {}, {}, {}
+	---@return table?
+	local function cursorOf(pid)
+		local view = hist.view
+		if not (view and hist.ready and config.historyCursors) then
+			return nil
+		end
+		local x, z = view:CursorAt(pid, hist.viewFrame)
+		if not x then
+			return nil
+		end
+		local t = tbls[pid]
+		if not t then
+			t = { 0, 0, 0, nil, nil, nil, 1 }
+			tbls[pid] = t
+		end
+		t[1], t[3] = x, z
+		return t
+	end
+	api = {
+		getCursor = function(pid)
+			local t = cursorOf(pid)
+			return t, t ~= nil
+		end,
+		getCursors = function()
+			for pid in pairs(cursors) do
+				cursors[pid], notIdle[pid] = nil, nil
+			end
+			local players = Spring.GetPlayerList()
+			for i = 1, #players do
+				local pid = players[i]
+				local t = cursorOf(pid)
+				if t then
+					cursors[pid], notIdle[pid] = t, true
+				end
+			end
+			return cursors, notIdle
+		end,
+	}
+	hist.cursorApi = api
+	return api
+end
+
 -- the tracked player's recorded camera in the live tracker's table shape
 function miscState.hist.TrackedCamera(playerID)
 	local hist = miscState.hist
@@ -14150,6 +14333,16 @@ function miscState.hist.TrackedCamera(playerID)
 		st.dist, st.height = h, nil
 	end
 	return st
+end
+
+-- the team's recorded resources at the viewed frame (see View:ResourcesAt), nil when the log has none
+function miscState.hist.TeamResources(teamID)
+	local hist = miscState.hist
+	if not hist.view then
+		return nil
+	end
+	hist.resOut = hist.resOut or {}
+	return hist.view:ResourcesAt(teamID, hist.viewFrame, hist.resOut)
 end
 
 -- hits arrive by the thousand in a big fight: no engine calls, no UnitDefs proxy reads here
@@ -14234,7 +14427,7 @@ end
 
 function miscState.hist.Init()
 	local hist = miscState.hist
-	hist.lib = VFS.Include("luaui/Include/pip_history.lua")
+	hist.lib = require("luaui/Include/pip_history")
 	local store = WG.pipHistoryStore
 	if not store then
 		-- a /luaui reload wipes WG: pick the log back up from the file Shutdown wrote
@@ -14251,14 +14444,33 @@ function miscState.hist.Init()
 	if config.historyEnabled then
 		hist.RemoveStaleSegmentFiles()
 	end
-	hist.cmdColor = {
-		cmdColors[CMD.MOVE],
-		cmdColors[CMD.FIGHT],
-		cmdColors[CMD.ATTACK],
-		cmdColors[CMD.PATROL],
-		cmdColors.unknown,
-		cmdColors.unknown,
+	-- logged order kinds (1-6 keep their meaning in older logs; 5 = build, 6 = unknown)
+	local kinds = {
+		CMD.MOVE,
+		CMD.FIGHT,
+		CMD.ATTACK,
+		CMD.PATROL,
+		false,
+		false,
+		CMD.GUARD,
+		CMD.CAPTURE,
+		CMD.REPAIR,
+		CMD.RECLAIM,
+		CMD.RESTORE,
+		CMD.RESURRECT,
+		CMD.LOAD_UNITS,
+		CMD.UNLOAD_UNIT,
+		CMD.UNLOAD_UNITS,
+		GameCMD.UNIT_SET_TARGET_NO_GROUND,
 	}
+	hist.cmdKind, hist.cmdColor = {}, {}
+	for kind = 1, #kinds do
+		local cmdID = kinds[kind]
+		if cmdID then
+			hist.cmdKind[cmdID] = kind
+		end
+		hist.cmdColor[kind] = cmdID and cmdColors[cmdID] or cmdColors.unknown
+	end
 	hist.outIndex = {}
 	hist.explosionByKey = {}
 	hist.shatterByKey = {}
@@ -14338,27 +14550,26 @@ function miscState.hist.LogCommand(unitID, unitTeam, cmdID, cmdParams, cmdOpts)
 	if config.commandFXIgnoreNewUnits and finishTime and (wallClockTime - finishTime) < 0.3 then
 		return
 	end
-	local kind
-	if cmdID == CMD.MOVE then
-		kind = 1
-	elseif cmdID == CMD.FIGHT then
-		kind = 2
-	elseif cmdID == CMD.ATTACK then
-		kind = 3
-	elseif cmdID == CMD.PATROL then
-		kind = 4
-	elseif cmdID < 0 then
-		kind = 5
-	else
+	-- every order the live FX draws
+	local kind = miscState.hist.cmdKind[cmdID] or (cmdID < 0 and 5)
+	if not kind then
 		return
 	end
 	local n = cmdParams and #cmdParams or 0
-	local x, z, target = 0, 0, 0
+	local x, z, target, _
 	if n >= 3 then
 		x, z = cmdParams[1], cmdParams[3]
-	elseif n == 1 and kind == 3 and cmdParams[1] < (Game.maxUnits or 32000) then
-		target = cmdParams[1]
-	else
+	elseif n == 1 then
+		-- playback follows a unit target; its position here is the fallback
+		local id, maxUnits = cmdParams[1], Game.maxUnits or 32000
+		if id >= maxUnits then
+			x, _, z = spFunc.GetFeaturePosition((id - maxUnits) --[[@as integer]])
+		else
+			x, _, z = spFunc.GetUnitPosition(id)
+			target = id
+		end
+	end
+	if not x then
 		return
 	end
 	store:OnCommand(unitID, kind, x, z, target, cmdOpts and cmdOpts.shift, miscState.hist.frame or Spring.GetGameFrame())
@@ -14483,8 +14694,27 @@ function miscState.hist.LiveFrame()
 end
 
 -- Spectator LOS view: the log holds every unit, so playback re-derives what the viewed
--- allyteam could see from its units' sight and radar radii on a coarse grid. Rebuilt once per
--- recorded tick, not per frame. hist.visMask[i]: nil = not filtering, 0 hidden, 1 radar, 2 seen.
+-- allyteam could see from its units' sight and radar radii on a coarse grid. The circles are
+-- rebuilt every historyLosFrames and whenever the ally set changes (a scout that died or flew
+-- on must not keep revealing); the mask follows every materialised frame by unit id, since
+-- the view's output slots shift as units appear and die between ticks.
+-- hist.visMask[i]: nil = not filtering, 0 hidden, 1 radar, 2 seen.
+---@class PipVisGrid
+---@field cell number
+---@field cols integer
+---@field los table<integer, table<integer, integer>> -- cell -> sight circle entries
+---@field losN table<integer, integer>
+---@field radar table<integer, table<integer, integer>>
+---@field radarN table<integer, integer>
+---@field jam table<integer, table<integer, integer>> -- enemy jammers: radar contacts inside are dropped
+---@field jamN table<integer, integer>
+---@field used table<integer, integer>
+---@field usedN integer
+---@field ex table<integer, number> -- circle centres and squared radii by entry
+---@field ez table<integer, number>
+---@field er2 table<integer, number>
+---@field ea2 table<integer, number> -- squared radius against flying units
+---@field eh table<integer, number> -- emitter altitude for the terrain ray
 function miscState.hist.BuildViewFilter()
 	local hist = miscState.hist
 	local view = hist.view
@@ -14494,23 +14724,44 @@ function miscState.hist.BuildViewFilter()
 	if not view or not store or not viewAlly or not (cameraState.mySpecState and fullview) then
 		hist.visMask = nil
 		hist.visTick = nil
+		hist.visSerial = nil
+		hist.visById = nil
+		hist.visSeenOnce = nil
 		return
 	end
-	if hist.visTick == view.appliedTick and hist.visAlly == viewAlly and hist.visGen == store.generation then
+	if hist.visSerial == hist.builtSerial and hist.visAlly == viewAlly and hist.visGen == store.generation then
 		return
 	end
-	hist.visTick, hist.visAlly, hist.visGen = view.appliedTick, viewAlly, store.generation
 	local tBuild = os.clock()
-	local sightOf, radarOf = hist.sightOf, hist.radarOf
-	if not sightOf then
-		sightOf, radarOf = {}, {}
+	local frame = hist.builtFrame
+	if hist.visAlly ~= viewAlly then
+		hist.visSeenOnce = nil -- what one perspective had seen does not type another's contacts
+	end
+	local rebuildGrid = hist.visAlly ~= viewAlly
+		or hist.visGen ~= store.generation
+		or not hist.visById
+		or math.abs(frame - (hist.visFrame or 0)) >= config.historyLosFrames
+	hist.visSerial, hist.visTick, hist.visAlly, hist.visGen =
+		hist.builtSerial, view.appliedTick, viewAlly, store.generation
+	local sightOf, radarOf, jamOf = hist.sightOf, hist.radarOf, hist.jamOf
+	if not jamOf then
+		sightOf, radarOf, jamOf = {}, {}, {}
+		local airOf, eyeOf, radarHOf = {}, {}, {}
 		for defID, ud in pairs(UnitDefs) do
 			sightOf[defID] = ud.sightDistance or 0
+			airOf[defID] = ud.airSightDistance or 0
 			radarOf[defID] = ud.radarDistance or 0
+			jamOf[defID] = ud.radarDistanceJam or 0
+			eyeOf[defID] = ud.losHeight or 20
+			radarHOf[defID] = ud.radarEmitHeight or 8
 		end
-		hist.sightOf, hist.radarOf = sightOf, radarOf
+		hist.sightOf, hist.radarOf, hist.jamOf = sightOf, radarOf, jamOf
+		hist.airOf, hist.eyeOf, hist.radarHOf = airOf, eyeOf, radarHOf
 	end
-	local grid = hist.visGrid
+	local airOf, eyeOf, radarHOf = hist.airOf, hist.eyeOf, hist.radarHOf
+	local terrain = config.historyLosTerrain
+	local GroundAt = hist.GroundAt
+	local grid = hist.visGrid --[[@as PipVisGrid?]]
 	if not grid then
 		grid = {
 			cell = 512,
@@ -14519,48 +14770,27 @@ function miscState.hist.BuildViewFilter()
 			losN = {},
 			radar = {},
 			radarN = {},
+			jam = {},
+			jamN = {},
 			used = {},
 			usedN = 0,
+			ex = {},
+			ez = {},
+			er2 = {},
+			ea2 = {},
+			eh = {},
 		}
 		hist.visGrid = grid
 	end
-	local cell, cols = grid.cell, grid.cols
-	local losCells, losN, radarCells, radarN, used = grid.los, grid.losN, grid.radar, grid.radarN, grid.used
-	for i = 1, grid.usedN do
-		local c = used[i]
-		losN[c] = 0
-		radarN[c] = 0
-	end
-	local usedN = 0
-	local function insert(cells, counts, x, z, r, idx)
-		local c0, c1 = math.floor((x - r) / cell), math.floor((x + r) / cell)
-		local r0, r1 = math.floor((z - r) / cell), math.floor((z + r) / cell)
-		for cz = r0, r1 do
-			for cx = c0, c1 do
-				local c = cz * cols + cx
-				local list = cells[c]
-				if not list then
-					list = {}
-					cells[c] = list
-				end
-				local cnt = counts[c] or 0
-				if cnt == 0 and (radarN[c] or 0) == 0 and (losN[c] or 0) == 0 then
-					usedN = usedN + 1
-					used[usedN] = c
-				end
-				cnt = cnt + 1
-				list[cnt] = idx
-				counts[c] = cnt
-			end
-		end
-	end
-	local outX, outZ, outDef, outTeam = view.outX, view.outZ, view.outDef, view.outTeam
+	local outX, outZ, outDef, outTeam, outId = view.outX, view.outZ, view.outDef, view.outTeam, view.outId
 	local count = view.outCount
 	local mask = hist.visMask
 	if not mask then
 		mask = {}
 		hist.visMask = mask
 	end
+	-- allies first: they are always seen, and their count and id sum tell when the set changed
+	local allyN, allyIds = 0, 0
 	for i = 1, count do
 		local team = outTeam[i]
 		local ally = teamAllyTeamCache[team]
@@ -14570,29 +14800,110 @@ function miscState.hist.BuildViewFilter()
 		end
 		if ally == viewAlly then
 			mask[i] = 2
-			local def = outDef[i]
-			local sight = sightOf[def] or 0
-			if sight > 0 then
-				insert(losCells, losN, outX[i], outZ[i], sight, i)
-			end
-			local radar = radarOf[def] or 0
-			if radar > 0 then
-				insert(radarCells, radarN, outX[i], outZ[i], radar, i)
-			end
+			allyN = allyN + 1
+			allyIds = allyIds + outId[i]
 		else
 			mask[i] = 0
 		end
 	end
-	grid.usedN = usedN
-	for i = 1, count do
-		if mask[i] == 0 then
-			mask[i] = hist.PosVisibility(outX[i], outZ[i])
-		end
+	if allyN ~= hist.visAllyN or allyIds ~= hist.visAllyIds then
+		rebuildGrid = true
 	end
+	if rebuildGrid then
+		hist.visFrame, hist.visAllyN, hist.visAllyIds = frame, allyN, allyIds
+		local byId = hist.visById
+		if byId then
+			for k in pairs(byId) do
+				byId[k] = nil
+			end
+		else
+			byId = {}
+			hist.visById = byId
+		end
+		local cell, cols = grid.cell, grid.cols
+		local losCells, losN, radarCells, radarN, used = grid.los, grid.losN, grid.radar, grid.radarN, grid.used
+		local jamCells, jamN = grid.jam, grid.jamN
+		local ex, ez, er2, ea2, eh = grid.ex, grid.ez, grid.er2, grid.ea2, grid.eh
+		for i = 1, grid.usedN do
+			local c = used[i]
+			losN[c] = 0
+			radarN[c] = 0
+			jamN[c] = 0
+		end
+		local usedN, en = 0, 0
+		-- circles are copied out of the view: its slots are renumbered on every materialise
+		local function insert(cells, counts, x, z, r, rAir, h)
+			en = en + 1
+			ex[en], ez[en], er2[en], ea2[en], eh[en] = x, z, r * r, rAir * rAir, h
+			r = math.max(r, rAir)
+			local c0, c1 = math.floor((x - r) / cell), math.floor((x + r) / cell)
+			local r0, r1 = math.floor((z - r) / cell), math.floor((z + r) / cell)
+			for cz = r0, r1 do
+				for cx = c0, c1 do
+					local c = cz * cols + cx
+					local list = cells[c]
+					if not list then
+						list = {}
+						cells[c] = list
+					end
+					local cnt = counts[c] or 0
+					if cnt == 0 and (radarN[c] or 0) == 0 and (losN[c] or 0) == 0 and (jamN[c] or 0) == 0 then
+						usedN = usedN + 1
+						used[usedN] = c
+					end
+					cnt = cnt + 1
+					list[cnt] = en
+					counts[c] = cnt
+				end
+			end
+		end
+		for i = 1, count do
+			if mask[i] == 2 then
+				local def = outDef[i]
+				local x, z = outX[i], outZ[i]
+				local sight, air = sightOf[def] or 0, airOf[def] or 0
+				if sight > 0 or air > 0 then
+					insert(losCells, losN, x, z, sight, air, terrain and GroundAt(x, z) + eyeOf[def] or 0)
+				end
+				local radar = radarOf[def] or 0
+				if radar > 0 then
+					insert(radarCells, radarN, x, z, radar, radar, terrain and GroundAt(x, z) + radarHOf[def] or 0)
+				end
+			else
+				local jam = jamOf[outDef[i]] or 0
+				if jam > 0 then
+					insert(jamCells, jamN, outX[i], outZ[i], jam, jam, 0)
+				end
+			end
+		end
+		grid.usedN = usedN
+	end
+	-- other units keep their visibility by id until the circles are rebuilt; units once in
+	-- sight stay typed on radar afterwards (the engine's PREVLOS), the rest draw as blips
+	local byId = hist.visById --[[@as table<number, integer>]]
+	local seenOnce = hist.visSeenOnce
+	if not seenOnce then
+		seenOnce = {}
+		hist.visSeenOnce = seenOnce
+	end
+	local PosVisibility = hist.PosVisibility
+	local flyer = cache.canFly
 	local hidden = 0
 	for i = 1, count do
 		if mask[i] == 0 then
-			hidden = hidden + 1
+			local uid = outId[i]
+			local v = byId[uid]
+			if v == nil then
+				v = PosVisibility(outX[i], outZ[i], flyer[outDef[i]])
+				byId[uid] = v
+				if v == 2 then
+					seenOnce[uid] = true
+				end
+			end
+			mask[i] = v
+			if v == 0 then
+				hidden = hidden + 1
+			end
 		end
 	end
 	for i = count + 1, #mask do
@@ -14602,36 +14913,83 @@ function miscState.hist.BuildViewFilter()
 	hist.visMs = (os.clock() - tBuild) * 1000
 end
 
--- 2 in sight, 1 on radar, 0 unseen for the viewed allyteam (after BuildViewFilter)
-function miscState.hist.PosVisibility(x, z)
+-- ground height on a 32-elmo grid, read from the engine once per cell
+function miscState.hist.GroundAt(x, z)
 	local hist = miscState.hist
-	local grid = hist.visGrid
+	local hg = hist.hgrid
+	if not hg then
+		hg = {}
+		hist.hgrid = hg
+		hist.hcols = math.ceil(mapInfo.mapSizeX / 32) + 2
+	end
+	local cx, cz = math.floor(x / 32), math.floor(z / 32)
+	local idx = cz * hist.hcols + cx
+	local h = hg[idx]
+	if h == nil then
+		h = Spring.GetGroundHeight(cx * 32 + 16, cz * 32 + 16)
+		hg[idx] = h
+	end
+	return h
+end
+
+-- true when no terrain sample along the ray rises above the line from the emitter altitude
+-- h0 to the target's ground h1 (the engine's LOS is a terrain-cell test too)
+function miscState.hist.LosClear(x0, z0, h0, x1, z1, h1)
+	local dx, dz = x1 - x0, z1 - z0
+	local n = math.floor(math.sqrt(dx * dx + dz * dz) / config.historyLosTerrainStep)
+	if n < 2 then
+		return true
+	end
+	local GroundAt = miscState.hist.GroundAt
+	for k = 1, n - 1 do
+		local t = k / n
+		if GroundAt(x0 + dx * t, z0 + dz * t) > h0 + (h1 - h0) * t then
+			return false
+		end
+	end
+	return true
+end
+
+-- 2 in sight, 1 on radar, 0 unseen for the viewed allyteam (after BuildViewFilter); a flying
+-- target uses the air sight radii and is never hidden by terrain
+function miscState.hist.PosVisibility(x, z, air)
+	local hist = miscState.hist
+	local grid = hist.visGrid --[[@as PipVisGrid?]]
 	local view = hist.view
 	if not grid or not hist.visMask or not view then
 		return 2
 	end
 	local c = math.floor(z / grid.cell) * grid.cols + math.floor(x / grid.cell)
-	local outX, outZ, outDef = view.outX, view.outZ, view.outDef
+	local ex, ez, er2, ea2, eh = grid.ex, grid.ez, grid.er2, grid.ea2, grid.eh
+	local terrain = config.historyLosTerrain and not air
+	local gz = terrain and hist.GroundAt(x, z) or 0
+	local LosClear = hist.LosClear
 	local list = grid.los[c]
-	local sightOf = hist.sightOf
 	if list then
 		for k = 1, grid.losN[c] or 0 do
-			local i = list[k]
-			local dx, dz = outX[i] - x, outZ[i] - z
-			local r = sightOf[outDef[i]] or 0
-			if dx * dx + dz * dz <= r * r then
+			local e = list[k]
+			local dx, dz = ex[e] - x, ez[e] - z
+			if dx * dx + dz * dz <= (air and ea2[e] or er2[e]) and (not terrain or LosClear(ex[e], ez[e], eh[e], x, z, gz)) then
 				return 2
 			end
 		end
 	end
 	list = grid.radar[c]
-	local radarOf = hist.radarOf
 	if list then
 		for k = 1, grid.radarN[c] or 0 do
-			local i = list[k]
-			local dx, dz = outX[i] - x, outZ[i] - z
-			local r = radarOf[outDef[i]] or 0
-			if dx * dx + dz * dz <= r * r then
+			local e = list[k]
+			local dx, dz = ex[e] - x, ez[e] - z
+			if dx * dx + dz * dz <= er2[e] and (not terrain or LosClear(ex[e], ez[e], eh[e], x, z, gz)) then
+				local jam = grid.jam[c]
+				if jam then
+					for j = 1, grid.jamN[c] or 0 do
+						local je = jam[j]
+						local jx, jz = ex[je] - x, ez[je] - z
+						if jx * jx + jz * jz <= er2[je] then
+							return 0
+						end
+					end
+				end
 				return 1
 			end
 		end
@@ -14657,18 +15015,29 @@ function miscState.hist.SyncFrame()
 		hist.viewFrame = frame
 	end
 	local viewAlly = miscState.pipViewAllyTeamID
-	if hist.builtFrame == frame and hist.builtGen == store.generation and hist.builtAlly == viewAlly then
+	local tracked = interactionState.trackingPlayerID
+	if
+		hist.builtFrame == frame
+		and hist.builtGen == store.generation
+		and hist.builtAlly == viewAlly
+		and hist.builtTrack == tracked
+	then
 		hist.ready = hist.builtReady
 		return
 	end
 	hist.builtFrame = frame
 	hist.builtGen = store.generation
 	hist.builtAlly = viewAlly
+	hist.builtTrack = tracked
 	-- bumped on every rebuild: the icon fill reuses its buffers while this stays the same
 	hist.builtSerial = (hist.builtSerial or 0) + 1
 	store:Want(frame)
 	hist.builtReady = view:Materialize(frame)
 	hist.ready = hist.builtReady
+	hist.selSet = nil
+	if hist.ready and config.historySelections and interactionState.trackingPlayerID then
+		hist.selSet = view:SelectionAt(interactionState.trackingPlayerID, frame)
+	end
 	hist.BuildViewFilter()
 	local filtering = hist.visMask ~= nil
 
@@ -14684,9 +15053,12 @@ function miscState.hist.SyncFrame()
 	-- explosions live at most ~2.1 s (see ExpireExplosions); deaths shatter for ~1.5 s
 	-- a hit flashes for 0.4 s of real time whatever the playback speed
 	local flashSpan = math.ceil(store.opts.flashFrames * (hist.speed or 1))
-	local window =
-		math.max(120, math.ceil(config.commandFXDuration * 30), math.ceil(config.mapDrawingDuration * 30), flashSpan)
-	view:CollectEvents(frame, window, flashSpan)
+	-- order lines fade over the live FX duration of real time too (up to 15 s of game time);
+	-- 5 more frames so an order chained from one just older still finds it
+	local fxSpan = math.max(1, math.min(450, config.commandFXDuration * 30 * (hist.speed or 1)))
+	hist.commandFXSpan = fxSpan
+	local window = math.max(120, math.ceil(fxSpan) + 5, math.ceil(config.mapDrawingDuration * 30), flashSpan)
+	view:CollectEvents(frame, window, flashSpan, fxSpan + 5)
 
 	local byKey = hist.explosionByKey
 	local list = hist.explosions
@@ -14783,8 +15155,8 @@ function miscState.hist.DrawIcons()
 		gl4Icons.DeactivateUnitpics()
 		return 1
 	end
-	local bdata = gl4Icons.bldgInstanceData --[[@as table<integer, number>]]
-	local data = gl4Icons.instanceData --[[@as table<integer, number>]]
+	local bdata = gl4Icons.bldgInstanceData --[[@as table<number, number>]]
+	local data = gl4Icons.instanceData --[[@as table<number, number>]]
 	local vbo, bldgVbo, vao, bldgVao = gl4Icons.vbo, gl4Icons.bldgVbo, gl4Icons.vao, gl4Icons.bldgVao
 	if not (bdata and data and vbo and bldgVbo and vao and bldgVao) then
 		return 1
@@ -14815,7 +15187,8 @@ function miscState.hist.DrawIcons()
 	local outX, outZ, outDef, outTeam, outFlags, outId, outHealth =
 		view.outX, view.outZ, view.outDef, view.outTeam, view.outFlags, view.outId, view.outHealth
 	local outBuild, flashes = view.outBuild, view.flashes
-	local visMask = hist.visMask
+	local visMask, selSet = hist.visMask, hist.selSet
+	local seenOnce, isBuilding = hist.visSeenOnce, cache.isBuilding
 	local layerTbl = gl4Icons.unitDefLayer
 	local serial = hist.builtSerial
 
@@ -14923,7 +15296,7 @@ function miscState.hist.DrawIcons()
 					up[2] = wtp.offsetZ + outZ[i] * wtp.scaleZ
 					up[3] = def
 					up[4] = outTeam[i]
-					up[5] = false
+					up[5] = selSet ~= nil and selSet[outId[i]] == true
 					up[6] = outBuild[i] or 1
 					up[7] = outId[i]
 					up[8] = (outHealth[i] or 100) / 100
@@ -14961,9 +15334,18 @@ function miscState.hist.DrawIcons()
 	-- recorded tick changed them. The live path marks its own uploads valid: those mean our
 	-- buffer contents are gone.
 	local bldgKept = hist.iconBldgVbo == bldgVbo and not gl4Icons._bldgVboValid
-	local fresh = bldgKept and hist.iconSerial == serial and hist.iconVbo == vbo and not gl4Icons._vboValid
+	-- only units in view are filled, so a camera move while paused refills too
+	local fresh = bldgKept
+		and hist.iconSerial == serial
+		and hist.iconVbo == vbo
+		and not gl4Icons._vboValid
+		and hist.iconViewL == viewL
+		and hist.iconViewR == viewR
+		and hist.iconViewT == viewT
+		and hist.iconViewB == viewB
 	if not fresh then
 		hist.iconSerial, hist.iconVbo, hist.iconBldgVbo = serial, vbo, bldgVbo
+		hist.iconViewL, hist.iconViewR, hist.iconViewT, hist.iconViewB = viewL, viewR, viewT, viewB
 		local instStep = gl4Icons.INSTANCE_STEP
 		local maxInst = gl4Icons.MAX_INSTANCES
 		local F_RADAR, F_GHOST = hist.lib.F_RADAR, hist.lib.F_GHOST
@@ -15022,7 +15404,8 @@ function miscState.hist.DrawIcons()
 		local mCount = math.min(base, maxInst)
 		for i = 1, n do
 			local layer = layerOf[i]
-			local d, off = data, 0
+			local d ---@type table<number, number>?
+			local off = 0
 			if layer == 0 then
 				if not bldgSame and bCount < maxInst then
 					d = bdata
@@ -15040,9 +15423,15 @@ function miscState.hist.DrawIcons()
 			if d then
 				local def = outDef[i]
 				local vis = visMask and visMask[i] or 2
-				local uvs = uvSizeLookup[def] or defaultUVSize
 				local flags = outFlags[i]
-				local isRadar = vis == 1 or flags % (F_RADAR * 2) >= F_RADAR
+				local onRadar = vis == 1 or flags % (F_RADAR * 2) >= F_RADAR
+				local uvs
+				if onRadar and not (seenOnce and seenOnce[outId[i]]) then
+					uvs = defaultUVSize
+				else
+					uvs = uvSizeLookup[def] or defaultUVSize
+				end
+				local isRadar = onRadar and not isBuilding[def]
 				local dim = (flags % (F_GHOST * 2) >= F_GHOST) and 0.6 or 1
 				local color = teamColors[outTeam[i]]
 				local r, g, b =
@@ -15050,6 +15439,9 @@ function miscState.hist.DrawIcons()
 				local flash = flashes[outId[i]] or 0
 				if flash > 0 then
 					r, g, b = r + (1 - r) * flash, g + (1 - g) * flash, b + (1 - b) * flash
+				end
+				if selSet and selSet[outId[i]] then
+					r, g, b = 1, 1, 1
 				end
 				d[off + 1] = outX[i]
 				d[off + 2] = outZ[i]
@@ -15201,9 +15593,11 @@ function miscState.hist.DrawEffects()
 	end
 
 	local frame = hist.viewFrame
-	local outIndex, outX, outZ = hist.outIndex, view.outX, view.outZ
+	local outIndex, outX, outZ, outTeam = hist.outIndex, view.outX, view.outZ, view.outTeam
 	local colors = hist.cmdColor
-	local fxFrames = math.max(1, config.commandFXDuration * 30)
+	-- like the live FX: order colours when tracking a player or playing, team colours otherwise
+	local byTeam = cameraState.mySpecState and not interactionState.trackingPlayerID
+	local fxFrames = hist.commandFXSpan or math.max(1, config.commandFXDuration * 30)
 	-- like the live FX, an order that follows another for the same unit within 0.15 s chains
 	-- from the previous target instead of the unit
 	local chainF, chainX, chainZ = hist.chainF, hist.chainX, hist.chainZ
@@ -15223,8 +15617,8 @@ function miscState.hist.DrawEffects()
 				local ti = outIndex[c.targetID]
 				if ti then
 					tx, tz = outX[ti], outZ[ti]
-				else
-					tx = nil
+				elseif tx == 0 and tz == 0 then
+					tx = nil -- older logs kept no target position
 				end
 			end
 			if tx then
@@ -15239,7 +15633,7 @@ function miscState.hist.DrawEffects()
 				local age = frame - c.frame
 				local alpha = config.commandFXOpacity * (1 - age / fxFrames)
 				if alpha > 0 and (math.abs(sx - tx) >= 1 or math.abs(sz - tz) >= 1) then
-					local col = colors[c.kind] or colors[6]
+					local col = (byTeam and teamColors[outTeam[src]]) or colors[c.kind] or colors[6]
 					local r, g, b = col[1], col[2], col[3]
 					GL4AddNormLine(sx, sz, tx, tz, r, g, b, alpha, r, g, b, alpha)
 				end
@@ -15434,7 +15828,10 @@ function miscState.hist.Seek(frame)
 	end
 	local live = hist.LiveFrame()
 	if frame >= live - 1 then
+		-- a drag that reaches live keeps dragging: moving back re-enters the history
+		local dragging = hist.dragging
 		hist.Exit()
+		hist.dragging = dragging
 		return
 	end
 	frame = math.max(first, frame)
@@ -15457,6 +15854,12 @@ end
 
 function miscState.hist.Advance(dt)
 	local hist = miscState.hist
+	if uiState.inMinMode then
+		if hist.mode then
+			hist.Exit()
+		end
+		return
+	end
 	if hist.mode and hist.playing and not hist.dragging then
 		local frame = hist.viewFrame + dt * 30 * (hist.speed or 1) * (hist.direction or 1)
 		if frame >= hist.LiveFrame() - 1 then
@@ -15529,11 +15932,12 @@ function miscState.hist.ComputeLayout(mx, my)
 		first, live = 0, 30
 	end
 	local ib = math.floor(bs * 0.7)
-	local cy = b + math.floor(bs * 0.5)
+	local cy = b + math.floor(bandH * 0.5)
 	lay.visible = true
 	lay.l, lay.r, lay.b, lay.t = l, r, b, t
 	lay.cy = cy
 	lay.ib = ib
+	-- play / pause and skip-to-live keep their slots at live (blank), so nothing shifts
 	lay.playL = l + pad * 2
 	lay.playR = lay.playL + ib
 	lay.liveL = lay.playR + pad
@@ -15585,11 +15989,16 @@ function miscState.hist.DrawTimeline(mx, my)
 		return
 	end
 
-	-- play / pause
+	-- play / pause and skip-to-live: active while rewinding, a faint hint at live
 	local ib = lay.ib
 	local px, cy = lay.playL, lay.cy
-	local hoverPlay = inBand and mx >= lay.playL and mx <= lay.playR
-	glFunc.Color(hist.mode and accent or { light[1], light[2], light[3], hoverPlay and 1 or 0.5 })
+	local hoverPlay = hist.mode and inBand and mx >= lay.playL and mx <= lay.playR
+	local hoverLive = hist.mode and inBand and mx >= lay.liveL and mx <= lay.liveR
+	if hist.mode then
+		glFunc.Color(accent)
+	else
+		glFunc.Color(light[1], light[2], light[3], 0.18)
+	end
 	if hist.mode and hist.playing then
 		local w = ib * 0.22
 		gl.Rect(px + ib * 0.2, cy - ib * 0.32, px + ib * 0.2 + w, cy + ib * 0.32)
@@ -15601,15 +16010,12 @@ function miscState.hist.DrawTimeline(mx, my)
 			glFunc.Vertex(px + ib * 0.82, cy)
 		end)
 	end
-
-	-- LIVE
-	-- skip-to-live glyph: a triangle against an end bar, red while at live
-	local hoverLive = inBand and mx >= lay.liveL and mx <= lay.liveR
+	-- skip-to-live glyph: a triangle against an end bar
 	local lx = lay.liveL
 	if hist.mode then
 		glFunc.Color(light[1], light[2], light[3], hoverLive and 1 or 0.85)
 	else
-		glFunc.Color(1, 0.35, 0.3, hoverLive and 1 or 0.8)
+		glFunc.Color(light[1], light[2], light[3], 0.18)
 	end
 	local gh = math.floor(ib * 0.34)
 	local bw = math.max(2, math.floor(ib * 0.12))
@@ -15740,19 +16146,17 @@ function miscState.hist.HandlePress(mx, my, mButton)
 	if mButton ~= 1 then
 		return true
 	end
-	if mx >= lay.playL and mx <= lay.playR then
+	if hist.mode and mx >= lay.playL and mx <= lay.playR then
 		-- left: play / pause forward, right: play backwards
 		if mButton == 3 then
 			hist.Reverse()
-		elseif not hist.mode then
-			hist.Seek(lay.live - 30 * 10)
 		elseif hist.playing and (hist.direction or 1) < 0 then
 			hist.PlayForward()
 		else
 			hist.direction = 1
 			hist.TogglePlay()
 		end
-	elseif mx >= lay.liveL and mx <= lay.liveR then
+	elseif hist.mode and mx >= lay.liveL and mx <= lay.liveR then
 		hist.Exit()
 	elseif mx >= lay.trackL and mx <= lay.trackR then
 		hist.Seek(hist.FrameAt(mx))
@@ -15769,9 +16173,6 @@ function miscState.hist.HandleMove(mx)
 	local lay = hist.ComputeLayout(mx, nil)
 	if lay.visible then
 		hist.Seek(hist.FrameAt(mx))
-		if not hist.mode then
-			hist.dragging = false
-		end
 	end
 	return true
 end
@@ -16319,9 +16720,8 @@ local function DrawUnitsAndFeatures(cachedSelectedUnits)
 		and config.trackedPlayerCursorGroundGlow
 		and interactionState.trackingPlayerID
 		and WG.allycursors
-		and not histMode
 	then
-		local allyCursors = WG.allycursors
+		local allyCursors = histMode and miscState.hist.CursorApi() or WG.allycursors
 		local trackedPlayerID = interactionState.trackingPlayerID
 		local trackedName, _, trackedSpec, trackedTeamID = spFunc.GetPlayerInfo(trackedPlayerID, false)
 		if trackedName and not trackedSpec and trackedTeamID then
@@ -16822,7 +17222,8 @@ local function DrawUnitsAndFeatures(cachedSelectedUnits)
 		and WG.allycursors.getCursor
 		and interactionState.trackingPlayerID
 	then
-		local cursor, isNotIdle = WG.allycursors.getCursor(interactionState.trackingPlayerID)
+		local cursorApi = histMode and miscState.hist.CursorApi() or WG.allycursors
+		local cursor, isNotIdle = cursorApi.getCursor(interactionState.trackingPlayerID)
 		if cursor and isNotIdle then
 			local wx, wz = cursor[1], cursor[3]
 			local cx, cy = WorldToPipCoords(wx, wz)
@@ -16895,8 +17296,11 @@ local function DrawUnitsAndFeatures(cachedSelectedUnits)
 	-- PipToWorldCoords to produce wrong results. Build preview is drawn
 	-- at full frame rate in DrawScreen via DrawBuildCursorWithRotation instead.
 	local mx, my = spFunc.GetMouseState()
-	DrawBuildDragPreview(iconRadiusZoomDistMult)
-	DrawQueuedBuilds(iconRadiusZoomDistMult, cachedSelectedUnits)
+	-- live build plans have no place in a rewound frame
+	if not histMode then
+		DrawBuildDragPreview(iconRadiusZoomDistMult)
+		DrawQueuedBuilds(iconRadiusZoomDistMult, cachedSelectedUnits)
+	end
 
 	glFunc.LineWidth(1.0)
 	gl.Scissor(false)
@@ -17224,6 +17628,20 @@ local function ShouldShowLOS()
 	return false, nil
 end
 
+-- the rewind shows the overlay of the perspective the data was recorded from when the live
+-- view has none (a fullview spectator looking at what was recorded as a player)
+function miscState.hist.LosView()
+	local show, ally = ShouldShowLOS()
+	local hist = miscState.hist
+	if not show and hist.mode and hist.ready and hist.view then
+		local rec = hist.view.recAlly
+		if rec and rec >= 0 then
+			return true, rec
+		end
+	end
+	return show, ally
+end
+
 -- Helper function to get the normalized water/lava threshold for the heightmap shader
 -- Returns the water/lava surface level in elmos for the heightmap shader
 -- On lava maps, does a lazy read from the game rule if not yet known
@@ -17339,7 +17757,7 @@ local function DrawWaterAndLOSOverlays()
 	gl.BlendFuncSeparate(GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA, GL.ONE, GL.ONE_MINUS_SRC_ALPHA)
 
 	-- Draw LOS darkening overlay
-	local shouldShowLOS = ShouldShowLOS()
+	local shouldShowLOS = miscState.hist.LosView()
 	if config.showLosOverlay and shouldShowLOS and pipR2T.losTex and gameHasStarted then
 		-- Only use scissor test if not rotated (scissor doesn't work with rotation)
 		if render.minimapRotation == 0 then
@@ -19333,21 +19751,34 @@ local function DrawTrackedPlayerResourceBars()
 		return
 	end
 
-	-- Get team resources - this works for spectators viewing any team
-	-- Returns: current, storage, pull, income, expense, share
-	local metalCur, metalMax, metalPull, metalIncome, metalExpense, metalShare =
-		Spring.GetTeamResources(teamID, "metal")
-	local energyCur, energyMax, energyPull, energyIncome, energyExpense, energyShare =
-		Spring.GetTeamResources(teamID, "energy")
+	local hist = miscState.hist ---@type PipHistState
+	local metalCur, metalMax, metalPull, metalIncome, metalShare
+	local energyCur, energyMax, energyPull, energyIncome, energyShare, mmLevel
+	if hist.mode then
+		-- Rewinding: the resources recorded at the viewed frame (no bars when the log has none)
+		local r = hist.TeamResources(teamID)
+		if not r then
+			return
+		end
+		metalCur, metalMax, metalPull, metalIncome, metalShare = r[1], r[2], r[3], r[4], r[5]
+		energyCur, energyMax, energyPull, energyIncome, energyShare = r[6], r[7], r[8], r[9], r[10]
+		mmLevel = r[11]
+	else
+		-- Get team resources - this works for spectators viewing any team
+		-- Returns: current, storage, pull, income, expense, share
+		local _
+		metalCur, metalMax, metalPull, metalIncome, _, metalShare = Spring.GetTeamResources(teamID, "metal")
+		energyCur, energyMax, energyPull, energyIncome, _, energyShare = Spring.GetTeamResources(teamID, "energy")
 
-	if not (metalCur and energyCur) then
-		return
-	end
+		if not (metalCur and energyCur) then
+			return
+		end
 
-	-- Get energy conversion level (mmLevel)
-	local mmLevel = Spring.GetTeamRulesParam(teamID, "mmLevel")
-	if mmLevel == nil then
-		mmLevel = 1
+		-- Get energy conversion level (mmLevel)
+		mmLevel = Spring.GetTeamRulesParam(teamID, "mmLevel")
+		if mmLevel == nil then
+			mmLevel = 1
+		end
 	end
 
 	-- Check if player has teammates (for share slider)
@@ -19496,10 +19927,12 @@ local function DrawTrackedPlayerResourceBars()
 		end
 	end
 
-	-- Text rendering - use cached display list, update at ~2 FPS
+	-- Text rendering - use cached display list, update at ~2 FPS and on each frame a paused or dragged rewind lands on
 	local currentTime = os.clock()
 	local needsTextUpdate = pipR2T.resbarTextDlist == nil
 		or pipR2T.resbarTextLastPlayerID ~= interactionState.trackingPlayerID
+		or pipR2T.resbarTextLastMode ~= hist.mode
+		or (hist.mode and (not hist.playing or hist.dragging) and pipR2T.resbarTextLastFrame ~= hist.viewFrame)
 		or (currentTime - pipR2T.resbarTextLastUpdate) >= pipR2T.resbarTextUpdateRate
 
 	if needsTextUpdate then
@@ -19545,6 +19978,8 @@ local function DrawTrackedPlayerResourceBars()
 
 		pipR2T.resbarTextLastUpdate = currentTime
 		pipR2T.resbarTextLastPlayerID = interactionState.trackingPlayerID
+		pipR2T.resbarTextLastMode = hist.mode
+		pipR2T.resbarTextLastFrame = hist.viewFrame
 	end
 
 	-- Draw the cached text display list
@@ -19833,7 +20268,7 @@ local function DrawTrackedPlayerMinimap()
 	end
 
 	-- Draw LOS overlay on minimap (only after game has started and when LOS should be shown)
-	local shouldShowLOS, _ = ShouldShowLOS()
+	local shouldShowLOS = miscState.hist.LosView()
 	if config.showLosOverlay and shouldShowLOS and pipR2T.losTex and gameHasStarted then
 		-- Engine-like reverse-subtract: result_rgb = dst - src (subtractive darkening)
 		gl.BlendEquationSeparate(GL.FUNC_REVERSE_SUBTRACT, GL.FUNC_ADD)
@@ -20778,23 +21213,28 @@ local function UpdateR2TCheapLayers(currentTime, pipUpdateInterval, pipWidth, pi
 	tracy.ZoneEnd()
 end
 
--- GL4 instanced decal rendering: GPU computes alpha fade, single draw call
--- VBO holds per-instance decal data, geometry shader expands points to rotated textured quads
--- Instance data only uploaded when decals are added/removed (not every frame)
+-- GL4 decal rendering: draws the Decals GL4 widget's own instance VBOs through VAOs of ours, so
+-- nothing is copied or uploaded. Its small-decal VBO starts at attribute 0 when that widget uses
+-- a geometry shader (drawn as points here too); its other VBOs start at 1 (instanced quads).
+---@class PipDecalSource
+---@field vbo VBO the decals widget's instance VBO this entry follows
+---@field vao VAO?
+---@field points boolean
+---@field shader integer?
+---@field count integer
+
+---@class PipDecalGL4
+---@field sources table<integer, PipDecalSource> one per decals widget VBO table
+---@field locs table<integer, table<string, integer>> uniform locations per shader
+---@field [string] any
+---@type PipDecalGL4
 decalGL4 = {
 	atlasPath = "luaui/images/decals_gl4/decalsgl4_atlas_diffuse.dds",
-	INSTANCE_STEP = 16, -- floats per instance (4 x vec4)
-	MAX_INSTANCES = 4096,
-	vbo = nil,
-	vao = nil,
-	instanceData = nil, -- pre-allocated flat float array
-	instanceCount = 0, -- current number of valid instances
-	version = -1, -- last usedElements sum (dirty check)
-	logCount = 0,
-	uniformLocs = nil, -- cached uniform locations
+	sources = {},
+	instanceCount = 0, -- decals drawn by the last render
 	renderFrame = 0, -- game frame for GPU alpha computation (set before R2T draw)
-	useGeometryShader = true,
 	quadVBO = nil,
+	locs = {},
 }
 
 -- Initialize GL4 decal resources (called during R2T setup)
@@ -20805,161 +21245,92 @@ InitGL4Decals = function()
 	if not shaders.decal then
 		return
 	end
-	local useGS = decalGL4.useGeometryShader
-
-	local vbo = gl.GetVBO(GL.ARRAY_BUFFER, true)
-	if not vbo then
-		Spring.Echo("[PIP] GL4 decals: Failed to create VBO")
+	local quadVBO = gl.GetVBO(GL.ARRAY_BUFFER, false)
+	if not quadVBO then
+		Spring.Echo("[PIP] GL4 decals: Failed to create quad VBO")
 		return
 	end
-	if useGS then
-		vbo:Define(decalGL4.MAX_INSTANCES, {
-			{ id = 0, name = "posRot", size = 4 },
-			{ id = 1, name = "sizeAlpha", size = 4 },
-			{ id = 2, name = "uvCoords", size = 4 },
-			{ id = 3, name = "spawnParams", size = 4 },
-		})
-	else
-		vbo:Define(decalGL4.MAX_INSTANCES, {
-			{ id = 1, name = "posRot", size = 4 },
-			{ id = 2, name = "sizeAlpha", size = 4 },
-			{ id = 3, name = "uvCoords", size = 4 },
-			{ id = 4, name = "spawnParams", size = 4 },
-		})
-		local quadVBO = gl.GetVBO(GL.ARRAY_BUFFER, false)
-		if not quadVBO then
-			Spring.Echo("[PIP] GL4 decals: Failed to create NoGS quad VBO")
-			vbo:Delete()
-			return
-		end
-		quadVBO:Define(4, { { id = 0, name = "quadPos", size = 2 } })
-		quadVBO:Upload({
-			-1.0,
-			-1.0,
-			1.0,
-			-1.0,
-			-1.0,
-			1.0,
-			1.0,
-			1.0,
-		})
-		decalGL4.quadVBO = quadVBO
+	quadVBO:Define(4, { { id = 0, name = "quadPos", size = 2 } })
+	quadVBO:Upload({
+		-1.0,
+		-1.0,
+		1.0,
+		-1.0,
+		-1.0,
+		1.0,
+		1.0,
+		1.0,
+	})
+	decalGL4.quadVBO = quadVBO
+	for _, shader in pairs({ shaders.decal, shaders.decalGS }) do
+		decalGL4.locs[shader] = {
+			gameFrame = gl.GetUniformLocation(shader, "gameFrame"),
+			invMapSize = gl.GetUniformLocation(shader, "invMapSize"),
+		}
 	end
-
-	local vao = gl.GetVAO()
-	if not vao then
-		Spring.Echo("[PIP] GL4 decals: Failed to create VAO")
-		vbo:Delete()
-		if decalGL4.quadVBO then
-			decalGL4.quadVBO:Delete()
-			decalGL4.quadVBO = nil
-		end
-		return
-	end
-	if useGS then
-		vao:AttachVertexBuffer(vbo)
-	else
-		vao:AttachVertexBuffer(decalGL4.quadVBO)
-		vao:AttachInstanceBuffer(vbo)
-	end
-
-	-- Pre-allocate instance data array
-	local instanceData = {}
-	for i = 1, decalGL4.MAX_INSTANCES * decalGL4.INSTANCE_STEP do
-		instanceData[i] = 0
-	end
-
-	decalGL4.vbo = vbo
-	decalGL4.vao = vao
-	decalGL4.instanceData = instanceData
-
-	-- Cache uniform locations
-	decalGL4.uniformLocs = {
-		gameFrame = gl.GetUniformLocation(shaders.decal, "gameFrame"),
-		invMapSize = gl.GetUniformLocation(shaders.decal, "invMapSize"),
-	}
 
 	Spring.Echo("[PIP] GL4 instanced decal rendering enabled")
 end
 
+-- Releases our VAOs (the VBOs belong to the decals widget)
+function decalGL4.ReleaseSources()
+	local sources = decalGL4.sources
+	for i = #sources, 1, -1 do
+		if sources[i].vao then
+			sources[i].vao:Delete()
+		end
+		sources[i] = nil
+	end
+	decalGL4.instanceCount = 0
+end
+
+-- Points one VAO per decals widget VBO table at the table's current instance VBO. That widget
+-- replaces a VBO (deleting the old one) whenever it grows, and drawing a VAO that holds a deleted
+-- VBO crashes the engine, so this runs right before every render.
+function decalGL4.SyncSources(vboTables)
+	local sources = decalGL4.sources
+	local total = 0
+	for i = 1, #vboTables do
+		local t = vboTables[i]
+		local src = sources[i]
+		if not src then
+			src = { count = 0 }
+			sources[i] = src
+		end
+		if not rawequal(src.vbo, t.instanceVBO) then
+			if src.vao then
+				src.vao:Delete()
+				src.vao = nil
+			end
+			src.vbo = t.instanceVBO
+			local base = t.layout[1].id
+			src.points = base == 0
+			src.shader = src.points and shaders.decalGS or (base == 1 and shaders.decal or nil)
+			local vao = src.shader and gl.GetVAO()
+			if vao then
+				if src.points then
+					vao:AttachVertexBuffer(src.vbo)
+				else
+					vao:AttachVertexBuffer(decalGL4.quadVBO)
+					vao:AttachInstanceBuffer(src.vbo)
+				end
+				src.vao = vao
+			end
+		end
+		src.count = src.vao and t.usedElements or 0
+		total = total + src.count
+	end
+	decalGL4.instanceCount = total
+end
+
 -- Destroy GL4 decal resources
 DestroyGL4Decals = function()
-	if decalGL4.vao then
-		decalGL4.vao:Delete()
-		decalGL4.vao = nil
-	end
-	if decalGL4.vbo then
-		decalGL4.vbo:Delete()
-		decalGL4.vbo = nil
-	end
+	decalGL4.ReleaseSources()
 	if decalGL4.quadVBO then
 		decalGL4.quadVBO:Delete()
 		decalGL4.quadVBO = nil
 	end
-	decalGL4.instanceData = nil
-	decalGL4.instanceCount = 0
-	decalGL4.version = -1
-	decalGL4.uniformLocs = nil
-end
-
--- Rebuild VBO instance data from decal VBO tables (only when decals added/removed)
--- Uses sequential index iteration (1..usedElements) instead of pairs() for speed.
--- The VBO uses swap-with-last compaction so indices are always contiguous.
-local function RebuildDecalVBO(vboTables)
-	local data = decalGL4.instanceData
-	local step = decalGL4.INSTANCE_STEP
-	local count = 0
-	local maxInst = decalGL4.MAX_INSTANCES
-
-	for vi = 1, #vboTables do
-		local vbo = vboTables[vi]
-		if vbo and vbo.usedElements > 0 then
-			local srcStep = vbo.instanceStep
-			local srcData = vbo.instanceData
-			local used = vbo.usedElements
-			-- Sequential iteration: ~3x faster than pairs() over sparse hash table
-			for idx = 1, used do
-				if count >= maxInst then
-					break
-				end
-				local ofs = (idx - 1) * srcStep
-				local p = srcData[ofs + 5]
-				local s = srcData[ofs + 7]
-				-- Only include textured decals (skip untextured color-only)
-				if p and s then
-					local o = count * step
-					-- posRot: worldX, worldZ, rotation, maxalpha
-					data[o + 1] = srcData[ofs + 13] -- posx
-					data[o + 2] = srcData[ofs + 15] -- posz
-					data[o + 3] = srcData[ofs + 3] -- rotation
-					data[o + 4] = srcData[ofs + 4] -- maxalpha
-					-- sizeAlpha: halfLengthX, halfWidthZ, alphastart, alphadecay
-					data[o + 5] = srcData[ofs + 1] * 0.5 -- half length
-					data[o + 6] = srcData[ofs + 2] * 0.5 -- half width
-					data[o + 7] = srcData[ofs + 9] -- alphastart
-					data[o + 8] = srcData[ofs + 10] -- alphadecay
-					-- uvCoords: p, q, s, t
-					data[o + 9] = p
-					data[o + 10] = srcData[ofs + 6] -- q
-					data[o + 11] = s
-					data[o + 12] = srcData[ofs + 8] -- t
-					-- spawnParams: spawnframe, 0, 0, 0
-					data[o + 13] = srcData[ofs + 16] -- spawnframe
-					data[o + 14] = 0
-					data[o + 15] = 0
-					data[o + 16] = 0
-					count = count + 1
-				end
-			end
-		end
-	end
-
-	decalGL4.instanceCount = count
-
-	-- Upload to GPU
-	if count > 0 then
-		decalGL4.vbo:Upload(data, nil, 0, 1, count * step)
-	end
+	decalGL4.locs = {}
 end
 
 -- Pre-created closure for R2T clear quad (no per-call allocation)
@@ -20985,14 +21356,20 @@ local function decalR2TDraw()
 
 		local atlasOK = glFunc.Texture(decalGL4.atlasPath)
 		if atlasOK then
-			gl.UseShader(shaders.decal)
-			local ul = decalGL4.uniformLocs
-			gl.UniformFloat(ul.gameFrame, decalGL4.renderFrame)
-			gl.UniformFloat(ul.invMapSize, 2.0 / mapInfo.mapSizeX, 2.0 / mapInfo.mapSizeZ)
-			if decalGL4.useGeometryShader then
-				decalGL4.vao:DrawArrays(GL.POINTS, decalGL4.instanceCount)
-			else
-				decalGL4.vao:DrawArrays(GL.TRIANGLE_STRIP, 4, 0, decalGL4.instanceCount)
+			local sources = decalGL4.sources
+			for i = 1, #sources do
+				local src = sources[i]
+				if src.count > 0 then
+					local locs = decalGL4.locs[src.shader]
+					gl.UseShader(src.shader)
+					gl.UniformFloat(locs.gameFrame, decalGL4.renderFrame)
+					gl.UniformFloat(locs.invMapSize, 2.0 / mapInfo.mapSizeX, 2.0 / mapInfo.mapSizeZ)
+					if src.points then
+						src.vao:DrawArrays(GL.POINTS, src.count)
+					else
+						src.vao:DrawArrays(GL.TRIANGLE_STRIP, 4, 0, src.count)
+					end
+				end
 			end
 			gl.UseShader(0)
 			glFunc.Texture(false)
@@ -21011,7 +21388,7 @@ local function UpdateDecalTexture()
 	if not pipR2T.decalTex then
 		return
 	end
-	if not decalGL4.vao then
+	if not decalGL4.quadVBO then
 		return
 	end
 
@@ -21023,36 +21400,21 @@ local function UpdateDecalTexture()
 	pipR2T.decalLastCheckFrame = frame
 
 	local decalsAPI = WG.decalsgl4
-	if not decalsAPI then
-		return
-	end
-	local getVBO = decalsAPI.GetVBOData
-	if not getVBO then
-		return
-	end
-	local vboTables = getVBO()
+	local vboTables = decalsAPI and decalsAPI.GetVBOData and decalsAPI.GetVBOData()
 	if not vboTables then
+		decalGL4.ReleaseSources()
 		return
 	end
-	local getVersion = decalsAPI.GetVersion
-	local decalVersion = getVersion and getVersion() or nil
 
 	tracy.ZoneBeginN("W:PIP:Decals:UpdateTexture")
-	if not decalVersion or decalVersion ~= decalGL4.version then
-		tracy.ZoneBeginN("W:PIP:Decals:RebuildVBO")
-		RebuildDecalVBO(vboTables)
-		if decalVersion then
-			decalGL4.version = decalVersion
-		end
-		tracy.ZoneEnd()
-	end
+	decalGL4.SyncSources(vboTables)
 
 	if decalGL4.instanceCount == 0 then
 		tracy.ZoneEnd()
 		return
 	end
 
-	-- Render into R2T texture: single instanced draw call, GPU computes alpha fade
+	-- Render into R2T texture: one draw call per decals widget VBO, GPU computes alpha fade
 	decalGL4.renderFrame = frame
 	tracy.ZoneBeginN("W:PIP:Decals:RenderTexture")
 	gl.R2tHelper.RenderToTexture(pipR2T.decalTex, decalR2TDraw)
@@ -21070,7 +21432,7 @@ function UpdateLOSTexture(currentTime)
 	end
 
 	-- Check if we should update LOS texture
-	local shouldShowLOS, losAllyTeam = ShouldShowLOS()
+	local shouldShowLOS, losAllyTeam = miscState.hist.LosView()
 	if not shouldShowLOS or not pipR2T.losTex then
 		return
 	end
@@ -22168,7 +22530,8 @@ function widget:DrawScreen()
 		-- Exit fallback immediately when zooming in so PIP R2T content appears without lag.
 		-- Keep off-debounce for non-zoom transitions (e.g. unit count hovering near threshold).
 		local leavingBecauseZoom = not (IsAtMinimumZoom(cameraState.zoom) and IsAtMinimumZoom(cameraState.targetZoom))
-		local holdTime = rawUseEngineMinimapFallback and 0.35 or (leavingBecauseZoom and 0 or 0.75)
+		local leavingNow = leavingBecauseZoom or miscState.hist.mode
+		local holdTime = rawUseEngineMinimapFallback and 0.35 or (leavingNow and 0 or 0.75)
 		if miscState.engineFallbackRawWantedSince and (now - miscState.engineFallbackRawWantedSince) < holdTime then
 			useEngineMinimapFallback = miscState.engineMinimapActive
 		else
@@ -23357,6 +23720,16 @@ function widget:Update(dt)
 	-- Run optional API debug sequence regardless of minimization state.
 	UpdateDebugCameraSequenceApi(os.clock())
 
+	-- Update wall-clock time (always advances, even when paused — used for blink/pulse animations)
+	-- Both clocks run while minimized too: a minimized instance can be the history recorder
+	wallClockTime = wallClockTime + dt
+
+	-- Update game time (only when game is not paused)
+	local _, _, isPaused = Spring.GetGameSpeed()
+	if not isPaused then
+		gameTime = gameTime + dt
+	end
+
 	-- Skip ALL heavy processing when minimized and not animating.
 	-- DrawScreen/DrawWorld already return early when minimized, so ghost cleanup,
 	-- TV camera, zoom interpolation, hover detection, etc. are pure waste.
@@ -23812,15 +24185,6 @@ function widget:Update(dt)
 		and not middleButton
 	then
 		interactionState.arePanning = false
-	end
-
-	-- Update wall-clock time (always advances, even when paused — used for blink/pulse animations)
-	wallClockTime = wallClockTime + dt
-
-	-- Update game time (only when game is not paused)
-	local _, _, isPaused = Spring.GetGameSpeed()
-	if not isPaused then
-		gameTime = gameTime + dt
 	end
 
 	-- Handle minimize/maximize animation
@@ -25046,7 +25410,7 @@ function widget:UnitDamaged(unitID, unitDefID, unitTeam, damage, paralyzer)
 	if paralyzer then
 		damage = damage * 0.1
 	end -- paralyzer visually counts for 1/10th
-	local maxHP = UnitDefs[unitDefID] and UnitDefs[unitDefID].health or 1
+	local maxHP = cache.unitMaxHealth[unitDefID] or 1
 	local intensity = math.min(1.0, damage / maxHP * 3) -- scale up so small hits are visible too
 	local existing = damageFlash[unitID]
 	if existing and (gameTime - existing.time) < DAMAGE_FLASH_DURATION then
@@ -25282,6 +25646,10 @@ pools.EraseMapLinesAt = function(x, z, radius)
 end
 
 function widget:MapDrawCmd(playerID, cmdType, mx, my, mz, a, b, c)
+	-- same filter as the map: ignored players' marks are dropped, their erases still apply
+	if cmdType ~= "erase" and WG.ignoreList and WG.ignoreList.isPlayerIgnored(playerID) then
+		return
+	end
 	miscState.hist.LogMapDraw(playerID, cmdType, mx, mz, a, c)
 	if uiState.inMinMode then
 		return
@@ -25340,14 +25708,6 @@ function widget:MapDrawCmd(playerID, cmdType, mx, my, mz, a, b, c)
 			end
 			if triggerFocus and isSpec and config.activityFocusIgnoreSpectators then
 				triggerFocus = false
-			end
-			-- Block activity focus for ignored players (uses WG.ignoredAccounts from api_ignore widget)
-			if triggerFocus and config.activityFocusBlockIgnoredPlayers and WG.ignoredAccounts then
-				local pName, _, _, _, _, _, _, _, _, _, pInfo = Spring.GetPlayerInfo(playerID)
-				local pAccountID = pInfo and pInfo.accountid and tonumber(pInfo.accountid)
-				if (pName and WG.ignoredAccounts[pName]) or (pAccountID and WG.ignoredAccounts[pAccountID]) then
-					triggerFocus = false
-				end
 			end
 			if triggerFocus and interactionState.trackingPlayerID then
 				triggerFocus = false

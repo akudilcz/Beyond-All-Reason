@@ -7,8 +7,7 @@ local KEYSYMS = KEYSYMS
 
 if not KEYSYMS then
 	local env = {}
-	-- VFS.ZIP: load the game's own header like barwidgets.lua does; in the default raw-first
-	-- mode the engine's LuaUI/Headers/keysym.h.lua shadows it, and that one needs setmetatable
+	-- the engine installs its own LuaUI/Headers loose, and the default mode reads raw files first
 	VFS.Include("luaui/Headers/keysym.h.lua", env, VFS.ZIP)
 	KEYSYMS = env.KEYSYMS
 end
