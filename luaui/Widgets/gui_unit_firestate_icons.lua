@@ -425,6 +425,8 @@ end
 -- Widget callbacks
 --------------------------------------------------------------------------------
 function widget:Initialize()
+	widgetHandler:RegisterUnitCommand(CMD_FIRE_STATE)
+	widgetHandler:RegisterUnitCommand(CMD_USER_FIRESTATE)
 	if not gl.CreateShader then -- headless / no shader support
 		widgetHandler:RemoveWidget()
 		return
@@ -664,5 +666,12 @@ end
 function widget:SetConfigData(data)
 	if data.showAllHoldFireIcons ~= nil then
 		showAllHoldFireIcons = data.showAllHoldFireIcons and true or false
+	end
+end
+
+function widget:Shutdown()
+	if type(fireIconShader) == "table" then
+		fireIconShader:Finalize()
+		fireIconShader = nil
 	end
 end
