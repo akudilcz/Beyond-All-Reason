@@ -34,7 +34,9 @@ function widget:UnitCmdDone(unitID, unitDefID, unitTeam, cmdID, cmdParams, _, _)
 	if unitTeam ~= spGetMyTeamID() then
 		return
 	end
-	if Spring.GetUnitCommandCount(unitID) > 0 then
+	-- nil when the engine no longer lets this widget read the unit as allied; leave it alone then
+	local commandCount = Spring.GetUnitCommandCount(unitID)
+	if commandCount == nil or commandCount > 0 then
 		return
 	end
 
