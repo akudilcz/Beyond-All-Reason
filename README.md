@@ -32,7 +32,7 @@ All 747 logic checks run in about 3.5 minutes at up to 30x game speed, on a flat
 
 ## What gets in
 
-Low-to-medium-risk bug fixes, performance work and small UX improvements, each reviewed first. No rewrites of core systems, and no balance or default-control changes. `origin` is upstream and `fork` is this repository; we sync with `git fetch origin && git merge origin/master`.
+Low-to-medium-risk bug fixes, performance work and small UX improvements, each reviewed first. Reviews, including what was skipped and why: [doc/community-prs.md](doc/community-prs.md). No rewrites of core systems, and no balance or default-control changes. `origin` is upstream and `fork` is this repository; we sync with `git fetch origin && git merge origin/master`.
 
 ---
 
