@@ -168,8 +168,12 @@ return {
 		local bcsv = ctx.call("spawnGroup", team, "armck", 1, cx, cz) or ""
 		local builder = tonumber(tostring(bcsv):match("%d+"))
 		ctx.waitSimFrames(10)
+		local siteHeight = Spring.GetGroundHeight(cx, cz + 300)
 		if not builder then
 			ctx.check("drag_build_one_frame", false, "could not spawn a builder")
+		elseif siteHeight <= 0 then
+			ctx.check("drag_build_one_frame", false, string.format(
+				"the build line is under water (ground at %.0f): an earlier scenario left the map flooded", siteHeight))
 		else
 			Spring.SelectUnitArray({ builder })
 			ctx.waitFrames(3)

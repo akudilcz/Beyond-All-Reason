@@ -136,6 +136,10 @@ return {
 			end
 		end
 		ctx.call("clear")
+		if arenaHeight ~= nil and arenaHeight < 0 then -- nil: arena.prepare's dry default
+			-- hand later scenarios dry land: on a flooded map no land structure can be placed
+			ctx.call("prepare")
+		end
 	end,
 }
 end
