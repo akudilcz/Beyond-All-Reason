@@ -4,34 +4,40 @@
 -- keeps its GUARD order second in the queue while it repairs or attacks for the guarded
 -- unit, so the filter must look past those (PR #9497; before it only saw GUARD first).
 
+local SpecEnv = VFS.Include("spec/support/spec_env.lua")
+
 local GUARD, REPAIR, ATTACK, MOVE = 25, 40, 20, 10
 
 -- unitID -> command queue (ids, current first)
 local queues
 
 local function loadSelectApi()
-	_G.CMD.GUARD, _G.CMD.REPAIR, _G.CMD.ATTACK, _G.CMD.MOVE = GUARD, REPAIR, ATTACK, MOVE
-	_G.Game.armorTypes = { default = 0, vtol = 1 }
-	_G.WG = {}
-	_G.UnitDefs = { [1] = { name = "armck" } }
-	_G.Spring.GetUnitDefID = function(uid)
-		return queues[uid] and 1 or nil
-	end
-	_G.Spring.GetUnitCurrentCommand = function(uid, index)
-		return (queues[uid] or {})[index]
-	end
-	_G.Spring.GetUnitCommands = function(uid, count)
-		local cmds = {}
-		for i, id in ipairs(queues[uid] or {}) do
-			if i > count then break end
-			cmds[i] = { id = id, params = {} }
-		end
-		return cmds
-	end
-	_G.Spring.GetUnitCommandCount = function(uid)
-		return #(queues[uid] or {})
-	end
-	local api = require("luaui/Include/select_api")
+	local env = SpecEnv.new({
+		CMD = { GUARD = GUARD, REPAIR = REPAIR, ATTACK = ATTACK, MOVE = MOVE },
+		Game = { armorTypes = { default = 0, vtol = 1 } },
+		WG = {},
+		UnitDefs = { [1] = { name = "armck" } },
+		Spring = {
+			GetUnitDefID = function(uid)
+				return queues[uid] and 1 or nil
+			end,
+			GetUnitCurrentCommand = function(uid, index)
+				return (queues[uid] or {})[index]
+			end,
+			GetUnitCommands = function(uid, count)
+				local cmds = {}
+				for i, id in ipairs(queues[uid] or {}) do
+					if i > count then break end
+					cmds[i] = { id = id, params = {} }
+				end
+				return cmds
+			end,
+			GetUnitCommandCount = function(uid)
+				return #(queues[uid] or {})
+			end,
+		},
+	})
+	local api = SpecEnv.include(env, "luaui/Include/select_api.lua")
 	return api
 end
 

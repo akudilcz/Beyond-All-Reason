@@ -1,16 +1,22 @@
 -- i18n: a table-level lookup (e.g. Spring.I18N("ui.unitstats")) must still fall back per key
 -- to the fallback locale when the active locale's table is only partly translated (PR #8076).
-_G.I18N_PATH = "modules/i18n/i18nlib/i18n/"
-local i18n = VFS.Include(I18N_PATH .. "init.lua")
+local SpecEnv = VFS.Include("spec/support/spec_env.lua")
+
+local I18N_PATH = "modules/i18n/i18nlib/i18n/"
+local i18n = SpecEnv.include(
+	SpecEnv.new({
+		I18N_PATH = I18N_PATH,
+		Spring = {
+			-- translate() reads the "English unit names" option
+			GetConfigInt = function(_, default)
+				return default
+			end,
+		},
+	}),
+	I18N_PATH .. "init.lua"
+)
 
 describe("i18n table-level fallback", function()
-	setup(function()
-		-- translate() reads the "English unit names" option
-		Spring.GetConfigInt = Spring.GetConfigInt or function(_, default)
-			return default
-		end
-	end)
-
 	before_each(function()
 		i18n.reset()
 		i18n.set("en.ui.stats.hp", "Health")
