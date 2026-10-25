@@ -2,6 +2,27 @@
 
 Open upstream PRs (game and lobby) reviewed for this fork, so later passes only look at new ones. Policy: "What gets in" in the [README](../README.md). Carried PRs are the `Merge PR #N` commits on `master`.
 
+## 2026-10-25
+
+Reviewed: open, non-draft PRs updated since 2026-10-10 that weren't reviewed in the last round, skipping the Mission API, new units and hats.
+
+Merged: #9827 (radar circles stay visible when zoomed out), #9792 (building ground AO no longer shows through slopes), #9818 (alt set target works with the no-ground variant and re-sends only changed target lists), #9787 (alt-drag area filter keeps the aircraft under the cursor; its spec adapted to SpecEnv, our #9214 filter and #9047).
+
+Superseded upstream since the last round: #9619 (Rampart wreck) and the #9548 options fix; both conflicts took upstream's version.
+
+Skipped:
+
+| PR | Why |
+|---|---|
+| #9804 | Changes where right-click quick mex places the mex (control change) |
+| #9545, #9565 | Pregame insertion and Area Mex insertion: features, 500 to 1,600 lines |
+| #9791 | Recompiles 172 unit scripts and changes hit tilt, which moves pieces (sim) |
+| #9805, #9819, #9730, #9821, #9808, #9793 | Weapon aim, targeting, volumes or unit stats: gameplay or balance |
+| #9803, #9484 | New target-priority and interceptor behaviour (gameplay) |
+| #9541, #8935, #9555, #9506 | Changes requested |
+
+Lobby (BYAR-Chobby): #1276 skipped (changes requested).
+
 ## 2026-10-10
 
 Merged: #9619 (Rampart wreck), #9584 (keybind editor key names), #9527 (autogroup numbers after construction), #9497 ("guarding" select filter), #9405 (geothermal ruins on scripted-geo maps), #9321 (cone light flicker), #8140 (Commando aiming script), and commit 5c60367c33 from #9548 (options error with the old user squad widget).
