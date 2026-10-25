@@ -1,4 +1,5 @@
 ---@diagnostic disable: undefined-field
+local SpecEnv = VFS.Include("spec/support/spec_env.lua")
 local widgetPath = "luaui/Widgets/cmd_area_commands_filter.lua"
 
 describe("Area Command Filter drag origin", function()
@@ -11,10 +12,21 @@ describe("Area Command Filter drag origin", function()
 		orders, held = {}, true
 		traceType, traceID, activeCommand = "unit", 101, 20
 		widget = {}
-		local defs = { [101] = 1, [102] = 1, [103] = 2 }
-		env = setmetatable({
+		-- the selected unit (1) is of def 3, which can attack: the filter drops incapable units
+		local defs = { [1] = 3, [101] = 1, [102] = 1, [103] = 2 }
+		env = SpecEnv.new({
 			widget = widget,
-			UnitDefs = {},
+			UnitDefs = { [3] = { canAttack = true, maxWeaponRange = 500 } },
+			BAR = {
+				Utilities = {
+					GetObjectPosition = function(id)
+						return id, 0, 0
+					end,
+					GetObjectCentroid = function()
+						return 0, 0
+					end,
+				},
+			},
 			Game = { maxUnits = 32000 },
 			CMD = { ATTACK = 20, CAPTURE = 21, GUARD = 25, REPAIR = 40, RECLAIM = 90, LOAD_UNITS = 75, RESURRECT = 125 },
 			GameCMD = { UNIT_SET_TARGET = 34923, UNIT_SET_TARGET_NO_GROUND = 34924 },
@@ -62,8 +74,8 @@ describe("Area Command Filter drag origin", function()
 					orders[#orders + 1] = params[1]
 				end,
 			},
-		}, { __index = _G })
-		setfenv(assert(loadfile(widgetPath)), env)()
+		})
+		SpecEnv.include(env, widgetPath)
 		widget:Initialize()
 	end)
 
@@ -94,8 +106,10 @@ describe("Area Command Filter drag origin", function()
 	end)
 
 	it("preserves Ctrl's all-types behavior", function()
+		-- Ctrl+Attack areas are left to the engine (#9047), so Set Target carries the case
+		activeCommand = env.GameCMD.UNIT_SET_TARGET
 		widget:MousePress(10, 20, 1)
-		assert.is_true(notify({ ctrl = true }))
+		assert.is_true(notify({ ctrl = true }, nil, activeCommand))
 		assert.same({ 101, 102, 103 }, orders)
 	end)
 
