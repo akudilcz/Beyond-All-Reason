@@ -2,6 +2,35 @@
 
 Open upstream PRs (game and lobby) reviewed for this fork, so later passes only look at new ones. Policy: "What gets in" in the [README](../README.md). Carried PRs are the `Merge PR #N` commits on `master`.
 
+## 2026-11-13
+
+Reviewed: open, non-draft PRs updated since 2026-10-25 that weren't reviewed in the last round, skipping the Mission API, new units and hats.
+
+Merged: #9998 (Legacy build keys keep cycling after Context Build swaps a building). Ported upstream's follow-up to our carried #9214 (b037940baf: Set Target needs a targetable weapon, factories don't count as repairers; spec fixture moved into our SpecEnv setup).
+
+Skipped:
+
+| PR | Why |
+|---|---|
+| #10080, #10077, #10051, #10050, #10049, #10048, #10047, #10002, #9874, #9873, #9859, #7149 | Mission API |
+| #10084 | Scout aim scripts change aiming (sim); conflicts after #10085 |
+| #9756 | Recompiles 846 bos files; conflicts after #10085 |
+| #10075 | Restores terrain under surviving buildings on a poll (sim change), 400 lines |
+| #10011 | Changes unit-cap transfer on share/take (rule change); author unsure |
+| #9838, #9801, #9775, #9245, #9913 | Gameplay or balance |
+| #9964 | Maintainer wants one selection-volume convention first (issue #9992) |
+| #9996 | Changes drag-input behaviour; one of two designs, unreviewed; overlaps the drag code under investigation |
+| #9215 | Selection-caching rework across 16 files; conflicts with our #9214/#9787 |
+| #9467 | Conflicts in `barwidgets.lua`; overlaps #9655 |
+| #9676 | Depends on an unmerged engine PR and a submodule bump; CI failing |
+| #8797 | On hold over an engine heading bug; conflicts |
+| #9294 | Removes widgets |
+| #10001, #9868, #9096, #9093, #8560, #8253, #7485, #7399 | Features |
+| #10041, #9935, #9924, #9880, #9869, #9524, #9392, #9142, #9129, #8527, #8207, #7622 | Changes requested |
+| #9804, #9545, #9819, #9793, #9803, #9484, #9541, #9555 | Reviewed in earlier rounds, not materially changed |
+
+Lobby (BYAR-Chobby): #1276 skipped (changes requested).
+
 ## 2026-10-25
 
 Reviewed: open, non-draft PRs updated since 2026-10-10 that weren't reviewed in the last round, skipping the Mission API, new units and hats.
