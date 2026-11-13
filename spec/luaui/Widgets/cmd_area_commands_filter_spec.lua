@@ -16,7 +16,15 @@ describe("Area Command Filter drag origin", function()
 		local defs = { [1] = 3, [101] = 1, [102] = 1, [103] = 2 }
 		env = SpecEnv.new({
 			widget = widget,
-			UnitDefs = { [3] = { canAttack = true, maxWeaponRange = 500 } },
+			UnitDefs = {
+				[3] = {
+					canAttack = true,
+					maxWeaponRange = 500,
+					customParams = {},
+					weapons = { { weaponDef = 1, slavedTo = 0 } },
+				},
+			},
+			WeaponDefs = { [1] = { type = "Cannon", range = 500 } },
 			BAR = {
 				Utilities = {
 					GetObjectPosition = function(id)
