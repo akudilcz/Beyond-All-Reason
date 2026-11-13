@@ -79,6 +79,10 @@ return {
 			local maker = create(makerName, x, z, 0, team)
 			if not maker then return "could not create " .. makerName end
 			local pid = UnitDefNames[productName].id
+			-- registered before the order: a builder already in build stance and in range
+			-- starts the product inside GiveOrderToUnit, so UnitCreated fires before it returns
+			jobs[i] = { maker = maker, product = productName, x = x, z = z }
+			jobOfMaker[maker] = i
 			if kind == "produce" then
 				Spring.GiveOrderToUnit(maker, -pid, {}, 0)
 			else
@@ -87,8 +91,6 @@ return {
 				local bx = x + (md.xsize + pd.xsize) * 4 + 48
 				Spring.GiveOrderToUnit(maker, -pid, { bx, Spring.GetGroundHeight(bx, z), z, 0 }, 0)
 			end
-			jobs[i] = { maker = maker, product = productName, x = x, z = z }
-			jobOfMaker[maker] = i
 			return 0
 		end,
 		-- why job i is not done: whether its product was started, by whom, how far
