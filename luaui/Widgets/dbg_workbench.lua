@@ -39,3 +39,9 @@ function widget:Update()
 		harness.Update()
 	end
 end
+
+function widget:DrawGenesis()
+	if harness then
+		harness.Draw()
+	end
+end
